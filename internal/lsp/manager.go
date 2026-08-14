@@ -279,6 +279,43 @@ func (m *Manager) Definition(ctx context.Context, name, file string, line, colum
 	return locationsFromDefinitionResult(path, result)
 }
 
+// References asks the named server for every reference to the symbol at a
+// 1-based line/column in file, waiting for the server to be ready first and
+// syncing the file's current on-disk content to it before asking. file may
+// be relative to Manager's root or absolute.
+func (m *Manager) References(ctx context.Context, name, file string, line, column int) ([]Location, error) {
+	proc, err := m.serverNamed(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
+		return nil, err
+	}
+
+	path := m.resolvePath(file)
+	if err := proc.syncFile(ctx, path); err != nil {
+		return nil, fmt.Errorf("sync %s: %w", path, err)
+	}
+
+	protocolLocations, err := proc.currentServer().References(ctx, &protocol.ReferenceParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
+			Position:     protocol.Position{Line: uint32(line - 1), Character: uint32(column - 1)},
+		},
+		Context: protocol.ReferenceContext{IncludeDeclaration: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("references: %w", err)
+	}
+
+	locations := make([]Location, len(protocolLocations))
+	for i, loc := range protocolLocations {
+		locations[i] = locationFromProtocol(loc)
+	}
+	return locations, nil
+}
+
 func (m *Manager) resolvePath(file string) string {
 	if filepath.IsAbs(file) {
 		return file

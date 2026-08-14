@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +37,9 @@ var (
 	ignoreExit       = flag.Bool("ignore-exit", false, "acknowledge shutdown but never act on exit, to simulate a server that will not stop on its own")
 	definitionLine   = flag.Int("definition-line", -1, "0-based line to answer textDocument/definition with, in the requested document; negative means no definition")
 	definitionColumn = flag.Int("definition-column", 0, "0-based character to answer textDocument/definition with")
+	referencesLine   = flag.Int("references-line", -1, "0-based line of the first canned textDocument/references location; negative means no references")
+	referencesColumn = flag.Int("references-column", 0, "0-based character of every canned textDocument/references location")
+	referencesCount  = flag.Int("references-count", 1, "how many canned locations to answer textDocument/references with, at consecutive lines from -references-line")
 
 	openDocs = map[string]bool{}
 )
@@ -80,6 +84,8 @@ func main() {
 			openDocs[documentURI(msg.Params)] = true
 		case "textDocument/definition":
 			handleDefinition(msg)
+		case "textDocument/references":
+			handleReferences(msg)
 		}
 	}
 }
@@ -136,6 +142,32 @@ func handleDefinition(msg message) {
 		`{"uri":%q,"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}}`,
 		docURI, *definitionLine, *definitionColumn, *definitionLine, *definitionColumn,
 	))
+}
+
+// handleReferences answers textDocument/references. Like handleDefinition,
+// it errors if the document was never opened, and otherwise returns
+// -references-count canned locations starting at -references-line, one per
+// consecutive line, or an empty array if -references-line is negative.
+func handleReferences(msg message) {
+	docURI := documentURI(msg.Params)
+	if !openDocs[docURI] {
+		respondError(msg.ID, -32000, fmt.Sprintf("document not open: %s", docURI))
+		return
+	}
+	if *referencesLine < 0 {
+		respond(msg.ID, "[]")
+		return
+	}
+
+	locations := make([]string, *referencesCount)
+	for i := range locations {
+		line := *referencesLine + i
+		locations[i] = fmt.Sprintf(
+			`{"uri":%q,"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}}`,
+			docURI, line, *referencesColumn, line, *referencesColumn,
+		)
+	}
+	respond(msg.ID, "["+strings.Join(locations, ",")+"]")
 }
 
 // workDoneProgressAdvertised reports whether the client's initialize params

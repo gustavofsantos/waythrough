@@ -26,6 +26,10 @@ func New(manager *lsp.Manager, cfg config.Config) *mcp.Server {
 		Name:        "get_definition",
 		Description: "Find where the symbol at a file position is defined.",
 	}, e.getDefinition)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_references",
+		Description: "List every place the symbol at a file position is used.",
+	}, e.listReferences)
 
 	return server
 }
@@ -78,6 +82,33 @@ func (e *editor) getDefinition(ctx context.Context, _ *mcp.CallToolRequest, in p
 	}
 
 	out := getDefinitionOutput{Locations: make([]location, len(locations))}
+	for i, loc := range locations {
+		out.Locations[i] = location{File: loc.File, Line: loc.Line, Column: loc.Column}
+	}
+	return nil, out, nil
+}
+
+type listReferencesOutput struct {
+	Locations []location `json:"locations"`
+}
+
+func (e *editor) listReferences(ctx context.Context, _ *mcp.CallToolRequest, in position) (*mcp.CallToolResult, listReferencesOutput, error) {
+	if in.Line < 1 || in.Column < 1 {
+		return nil, listReferencesOutput{}, fmt.Errorf("line and column are 1-based and must be at least 1, got line=%d column=%d", in.Line, in.Column)
+	}
+
+	ext := filepath.Ext(in.File)
+	name, ok := e.serverForExt[ext]
+	if !ok {
+		return nil, listReferencesOutput{}, fmt.Errorf("no configured language server for file extension %q", ext)
+	}
+
+	locations, err := e.manager.References(ctx, name, in.File, in.Line, in.Column)
+	if err != nil {
+		return nil, listReferencesOutput{}, err
+	}
+
+	out := listReferencesOutput{Locations: make([]location, len(locations))}
 	for i, loc := range locations {
 		out.Locations[i] = location{File: loc.File, Line: loc.Line, Column: loc.Column}
 	}
