@@ -7,17 +7,15 @@ import (
 )
 
 func newValidateCommand() *cobra.Command {
-	var configPath string
-
 	cmd := &cobra.Command{
 		Use:   "validate",
 		Short: "Validate a waythrough.yaml config file",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runValidate(configPath)
-		},
 	}
 
-	cmd.Flags().StringVar(&configPath, "config", "waythrough.yaml", "path to the config file to validate")
+	configPath := configFlag(cmd, "validate")
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return runValidate(*configPath)
+	}
 
 	return cmd
 }
