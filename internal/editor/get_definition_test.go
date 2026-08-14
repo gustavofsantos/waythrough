@@ -70,6 +70,20 @@ func errorText(result *mcp.CallToolResult) string {
 	return text.Text
 }
 
+// fakeConfig is a single-entry config naming a "fake" server backed by
+// fakelspPath for the ".fake" extension, with handshake readiness — the
+// shape every get_definition scenario below needs, save for the flags
+// passed to fakelsp.
+func fakeConfig(args ...string) config.Config {
+	return config.Config{LanguageServers: []config.LanguageServer{{
+		Name:      "fake",
+		Command:   fakelspPath,
+		Args:      args,
+		Readiness: config.ReadinessHandshake,
+		Filetypes: map[string]string{".fake": "fake"},
+	}}}
+}
+
 var _ = Describe("get_definition", func() {
 	var (
 		ctx    context.Context
@@ -88,13 +102,7 @@ var _ = Describe("get_definition", func() {
 		It("syncs the file's current content and returns the location, 1-based", func() {
 			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello world"), 0o644)).To(Succeed())
 
-			cfg := config.Config{LanguageServers: []config.LanguageServer{{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-definition-line=4", "-definition-column=2"},
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}}}
+			cfg := fakeConfig("-definition-line=4", "-definition-column=2")
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
@@ -114,12 +122,7 @@ var _ = Describe("get_definition", func() {
 		It("returns an empty result, not an error", func() {
 			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello"), 0o644)).To(Succeed())
 
-			cfg := config.Config{LanguageServers: []config.LanguageServer{{
-				Name:      "fake",
-				Command:   fakelspPath, // no -definition-line: fakelsp reports no definition
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}}}
+			cfg := fakeConfig() // no -definition-line: fakelsp reports no definition
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
@@ -131,12 +134,7 @@ var _ = Describe("get_definition", func() {
 
 	When("the file's extension has no configured language server", func() {
 		It("returns a tool error naming the extension", func() {
-			cfg := config.Config{LanguageServers: []config.LanguageServer{{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}}}
+			cfg := fakeConfig()
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
@@ -148,12 +146,7 @@ var _ = Describe("get_definition", func() {
 
 	When("the file's language server keeps failing to start", func() {
 		It("returns a tool error naming the server, not an empty result", func() {
-			cfg := config.Config{LanguageServers: []config.LanguageServer{{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-crash"},
-				Filetypes: map[string]string{".fake": "fake"},
-			}}}
+			cfg := fakeConfig("-crash")
 			manager := lsp.NewManager(root, cfg.LanguageServers,
 				lsp.WithRestartLimit(2, time.Minute),
 				lsp.WithToolCallTimeout(5*time.Second))
