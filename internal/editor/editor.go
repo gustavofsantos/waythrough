@@ -61,56 +61,56 @@ type location struct {
 	Column int    `json:"column"`
 }
 
-type getDefinitionOutput struct {
+type locationsOutput struct {
 	Locations []location `json:"locations"`
 }
 
-func (e *editor) getDefinition(ctx context.Context, _ *mcp.CallToolRequest, in position) (*mcp.CallToolResult, getDefinitionOutput, error) {
-	if in.Line < 1 || in.Column < 1 {
-		return nil, getDefinitionOutput{}, fmt.Errorf("line and column are 1-based and must be at least 1, got line=%d column=%d", in.Line, in.Column)
-	}
-
-	ext := filepath.Ext(in.File)
-	name, ok := e.serverForExt[ext]
-	if !ok {
-		return nil, getDefinitionOutput{}, fmt.Errorf("no configured language server for file extension %q", ext)
+func (e *editor) getDefinition(ctx context.Context, _ *mcp.CallToolRequest, in position) (*mcp.CallToolResult, locationsOutput, error) {
+	name, err := e.resolveTarget(in)
+	if err != nil {
+		return nil, locationsOutput{}, err
 	}
 
 	locations, err := e.manager.Definition(ctx, name, in.File, in.Line, in.Column)
 	if err != nil {
-		return nil, getDefinitionOutput{}, err
+		return nil, locationsOutput{}, err
 	}
-
-	out := getDefinitionOutput{Locations: make([]location, len(locations))}
-	for i, loc := range locations {
-		out.Locations[i] = location{File: loc.File, Line: loc.Line, Column: loc.Column}
-	}
-	return nil, out, nil
+	return nil, toLocationsOutput(locations), nil
 }
 
-type listReferencesOutput struct {
-	Locations []location `json:"locations"`
+func (e *editor) listReferences(ctx context.Context, _ *mcp.CallToolRequest, in position) (*mcp.CallToolResult, locationsOutput, error) {
+	name, err := e.resolveTarget(in)
+	if err != nil {
+		return nil, locationsOutput{}, err
+	}
+
+	locations, err := e.manager.References(ctx, name, in.File, in.Line, in.Column)
+	if err != nil {
+		return nil, locationsOutput{}, err
+	}
+	return nil, toLocationsOutput(locations), nil
 }
 
-func (e *editor) listReferences(ctx context.Context, _ *mcp.CallToolRequest, in position) (*mcp.CallToolResult, listReferencesOutput, error) {
+// resolveTarget validates a 1-based position and finds which configured
+// server handles in.File's extension — the checks every editor operation
+// needs before it can ask a language server anything.
+func (e *editor) resolveTarget(in position) (string, error) {
 	if in.Line < 1 || in.Column < 1 {
-		return nil, listReferencesOutput{}, fmt.Errorf("line and column are 1-based and must be at least 1, got line=%d column=%d", in.Line, in.Column)
+		return "", fmt.Errorf("line and column are 1-based and must be at least 1, got line=%d column=%d", in.Line, in.Column)
 	}
 
 	ext := filepath.Ext(in.File)
 	name, ok := e.serverForExt[ext]
 	if !ok {
-		return nil, listReferencesOutput{}, fmt.Errorf("no configured language server for file extension %q", ext)
+		return "", fmt.Errorf("no configured language server for file extension %q", ext)
 	}
+	return name, nil
+}
 
-	locations, err := e.manager.References(ctx, name, in.File, in.Line, in.Column)
-	if err != nil {
-		return nil, listReferencesOutput{}, err
-	}
-
-	out := listReferencesOutput{Locations: make([]location, len(locations))}
+func toLocationsOutput(locations []lsp.Location) locationsOutput {
+	out := locationsOutput{Locations: make([]location, len(locations))}
 	for i, loc := range locations {
 		out.Locations[i] = location{File: loc.File, Line: loc.Line, Column: loc.Column}
 	}
-	return nil, out, nil
+	return out
 }

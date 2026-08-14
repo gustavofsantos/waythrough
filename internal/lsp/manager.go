@@ -253,25 +253,13 @@ func (m *Manager) Status(name string) (Status, error) {
 // syncing the file's current on-disk content to it before asking. file may
 // be relative to Manager's root or absolute.
 func (m *Manager) Definition(ctx context.Context, name, file string, line, column int) ([]Location, error) {
-	proc, err := m.serverNamed(name)
+	proc, path, err := m.prepare(ctx, name, file)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
-		return nil, err
-	}
-
-	path := m.resolvePath(file)
-	if err := proc.syncFile(ctx, path); err != nil {
-		return nil, fmt.Errorf("sync %s: %w", path, err)
-	}
-
 	result, err := proc.currentServer().Definition(ctx, &protocol.DefinitionParams{
-		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
-			Position:     protocol.Position{Line: uint32(line - 1), Character: uint32(column - 1)},
-		},
+		TextDocumentPositionParams: textDocumentPosition(path, line, column),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("definition: %w", err)
@@ -284,26 +272,14 @@ func (m *Manager) Definition(ctx context.Context, name, file string, line, colum
 // syncing the file's current on-disk content to it before asking. file may
 // be relative to Manager's root or absolute.
 func (m *Manager) References(ctx context.Context, name, file string, line, column int) ([]Location, error) {
-	proc, err := m.serverNamed(name)
+	proc, path, err := m.prepare(ctx, name, file)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
-		return nil, err
-	}
-
-	path := m.resolvePath(file)
-	if err := proc.syncFile(ctx, path); err != nil {
-		return nil, fmt.Errorf("sync %s: %w", path, err)
-	}
-
 	protocolLocations, err := proc.currentServer().References(ctx, &protocol.ReferenceParams{
-		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
-			Position:     protocol.Position{Line: uint32(line - 1), Character: uint32(column - 1)},
-		},
-		Context: protocol.ReferenceContext{IncludeDeclaration: true},
+		TextDocumentPositionParams: textDocumentPosition(path, line, column),
+		Context:                    protocol.ReferenceContext{IncludeDeclaration: true},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("references: %w", err)
@@ -314,6 +290,31 @@ func (m *Manager) References(ctx context.Context, name, file string, line, colum
 		locations[i] = locationFromProtocol(loc)
 	}
 	return locations, nil
+}
+
+// prepare resolves file, waits for name's server to be ready, and syncs
+// file's current on-disk content to it — the setup every LSP position
+// request needs before it can ask the server anything.
+func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProcess, string, error) {
+	proc, err := m.serverNamed(name)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
+		return nil, "", err
+	}
+	path := m.resolvePath(file)
+	if err := proc.syncFile(ctx, path); err != nil {
+		return nil, "", fmt.Errorf("sync %s: %w", path, err)
+	}
+	return proc, path, nil
+}
+
+func textDocumentPosition(path string, line, column int) protocol.TextDocumentPositionParams {
+	return protocol.TextDocumentPositionParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
+		Position:     protocol.Position{Line: uint32(line - 1), Character: uint32(column - 1)},
+	}
 }
 
 func (m *Manager) resolvePath(file string) string {

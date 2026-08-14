@@ -9,19 +9,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"github.com/gustavofsantos/waythrough/internal/lsp"
 )
-
-func callListReferences(ctx context.Context, session *mcp.ClientSession, file string, line, column int) *mcp.CallToolResult {
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "list_references",
-		Arguments: map[string]any{"file": file, "line": line, "column": column},
-	})
-	Expect(err).NotTo(HaveOccurred(), "a tool-level failure is not a protocol error")
-	return result
-}
 
 var _ = Describe("list_references", func() {
 	var (
@@ -45,7 +34,7 @@ var _ = Describe("list_references", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callListReferences(ctx, session, "main.fake", 1, 1)
+			result := callTool(ctx, session, "list_references", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 
 			out := decodeOutput(result)
@@ -64,7 +53,7 @@ var _ = Describe("list_references", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callListReferences(ctx, session, "main.fake", 1, 1)
+			result := callTool(ctx, session, "list_references", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 			Expect(decodeOutput(result).Locations).To(BeEmpty())
 		})
@@ -76,7 +65,7 @@ var _ = Describe("list_references", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callListReferences(ctx, session, "main.unknown", 1, 1)
+			result := callTool(ctx, session, "list_references", "main.unknown", 1, 1)
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring(".unknown"))
 		})
@@ -90,7 +79,7 @@ var _ = Describe("list_references", func() {
 				lsp.WithToolCallTimeout(5*time.Second))
 			session := connect(ctx, manager, cfg)
 
-			result := callListReferences(ctx, session, "main.fake", 1, 1)
+			result := callTool(ctx, session, "list_references", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring("fake"))
 		})
