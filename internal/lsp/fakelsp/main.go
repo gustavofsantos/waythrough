@@ -64,7 +64,7 @@ func main() {
 				go runProgressCycle(workDoneProgressAdvertised(msg))
 			}
 		case "shutdown":
-			writeMessage(message{JSONRPC: "2.0", ID: msg.ID, Result: json.RawMessage("null")})
+			respond(msg.ID, "null")
 		case "exit":
 			if *ignoreExit {
 				continue
@@ -79,11 +79,11 @@ var lastInitializeParams json.RawMessage
 
 func handleInitialize(msg message) {
 	lastInitializeParams = msg.Params
-	writeMessage(message{
-		JSONRPC: "2.0",
-		ID:      msg.ID,
-		Result:  json.RawMessage(`{"capabilities":{}}`),
-	})
+	respond(msg.ID, `{"capabilities":{}}`)
+}
+
+func respond(id json.RawMessage, result string) {
+	writeMessage(message{JSONRPC: "2.0", ID: id, Result: json.RawMessage(result)})
 }
 
 // workDoneProgressAdvertised reports whether the client's initialize params
@@ -116,18 +116,16 @@ func runProgressCycle(advertised bool) {
 		Params:  json.RawMessage(fmt.Sprintf(`{"token":%s}`, token)),
 	})
 
-	writeMessage(message{
-		JSONRPC: "2.0",
-		Method:  "$/progress",
-		Params:  json.RawMessage(fmt.Sprintf(`{"token":%s,"value":{"kind":"begin","title":"Indexing"}}`, token)),
-	})
-
+	sendProgress(token, `{"kind":"begin","title":"Indexing"}`)
 	time.Sleep(*progressDelay)
+	sendProgress(token, `{"kind":"end"}`)
+}
 
+func sendProgress(token, value string) {
 	writeMessage(message{
 		JSONRPC: "2.0",
 		Method:  "$/progress",
-		Params:  json.RawMessage(fmt.Sprintf(`{"token":%s,"value":{"kind":"end"}}`, token)),
+		Params:  json.RawMessage(fmt.Sprintf(`{"token":%s,"value":%s}`, token, value)),
 	})
 }
 
