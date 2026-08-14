@@ -7,7 +7,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -24,9 +27,10 @@ import (
 const defaultProgressDebounce = 250 * time.Millisecond
 
 const (
-	defaultRestartLimit  = 3
-	defaultRestartWindow = 60 * time.Second
-	defaultShutdownGrace = 5 * time.Second
+	defaultRestartLimit    = 3
+	defaultRestartWindow   = 60 * time.Second
+	defaultShutdownGrace   = 5 * time.Second
+	defaultToolCallTimeout = 30 * time.Second
 )
 
 // Status is a language server's place in its own lifecycle.
@@ -52,9 +56,18 @@ type Manager struct {
 	restartLimit     int
 	restartWindow    time.Duration
 	shutdownGrace    time.Duration
+	toolCallTimeout  time.Duration
 
 	mu    sync.Mutex
 	procs map[string]*serverProcess
+}
+
+// Location is a position in a file, 1-based to match how a coding agent
+// reads line and column numbers.
+type Location struct {
+	File   string
+	Line   int
+	Column int
 }
 
 // Option configures a Manager.
@@ -83,6 +96,12 @@ func WithShutdownGrace(d time.Duration) Option {
 	return func(m *Manager) { m.shutdownGrace = d }
 }
 
+// WithToolCallTimeout overrides how long a request such as Definition waits
+// for its server to become ready before giving up.
+func WithToolCallTimeout(d time.Duration) Option {
+	return func(m *Manager) { m.toolCallTimeout = d }
+}
+
 // NewManager builds a Manager for entries. root is the project directory
 // passed to each language server as its workspace root.
 func NewManager(root string, entries []config.LanguageServer, opts ...Option) *Manager {
@@ -92,6 +111,7 @@ func NewManager(root string, entries []config.LanguageServer, opts ...Option) *M
 		restartLimit:     defaultRestartLimit,
 		restartWindow:    defaultRestartWindow,
 		shutdownGrace:    defaultShutdownGrace,
+		toolCallTimeout:  defaultToolCallTimeout,
 		procs:            make(map[string]*serverProcess, len(entries)),
 	}
 	for _, opt := range opts {
@@ -228,6 +248,76 @@ func (m *Manager) Status(name string) (Status, error) {
 	return status, nil
 }
 
+// Definition asks the named server for the definition at a 1-based
+// line/column in file, waiting for the server to be ready first and
+// syncing the file's current on-disk content to it before asking. file may
+// be relative to Manager's root or absolute.
+func (m *Manager) Definition(ctx context.Context, name, file string, line, column int) ([]Location, error) {
+	proc, err := m.serverNamed(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
+		return nil, err
+	}
+
+	path := m.resolvePath(file)
+	if err := proc.syncFile(ctx, path); err != nil {
+		return nil, fmt.Errorf("sync %s: %w", path, err)
+	}
+
+	result, err := proc.currentServer().Definition(ctx, &protocol.DefinitionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
+			Position:     protocol.Position{Line: uint32(line - 1), Character: uint32(column - 1)},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("definition: %w", err)
+	}
+	return locationsFromDefinitionResult(path, result)
+}
+
+func (m *Manager) resolvePath(file string) string {
+	if filepath.IsAbs(file) {
+		return file
+	}
+	return filepath.Join(m.root, file)
+}
+
+func locationsFromDefinitionResult(requestedPath string, result protocol.DefinitionResult) ([]Location, error) {
+	switch v := result.(type) {
+	case nil:
+		return nil, nil
+	case *protocol.Location:
+		if v == nil {
+			return nil, nil
+		}
+		return []Location{locationFromProtocol(*v)}, nil
+	case protocol.LocationSlice:
+		locations := make([]Location, len(v))
+		for i, loc := range v {
+			locations[i] = locationFromProtocol(loc)
+		}
+		return locations, nil
+	default:
+		return nil, fmt.Errorf("definition for %s: unsupported result shape %T (linkSupport was not advertised)", requestedPath, result)
+	}
+}
+
+func locationFromProtocol(loc protocol.Location) Location {
+	platform := uri.PlatformPOSIX
+	if runtime.GOOS == "windows" {
+		platform = uri.PlatformWindows
+	}
+	return Location{
+		File:   uri.FsPathFor(loc.URI, platform, false),
+		Line:   int(loc.Range.Start.Line) + 1,
+		Column: int(loc.Range.Start.Character) + 1,
+	}
+}
+
 func (m *Manager) serverNamed(name string) (*serverProcess, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -276,6 +366,82 @@ type serverProcess struct {
 	active       map[string]bool
 	everSawToken bool
 	shuttingDown bool
+	openFiles    map[string]openFile
+}
+
+// openFile is what the server was last told about a document Waythrough
+// has synced to it, so syncFile can tell didOpen from didChange and bump
+// the version LSP requires on every change.
+type openFile struct {
+	content string
+	version int32
+}
+
+func (p *serverProcess) currentServer() protocol.Server {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.server
+}
+
+// syncFile tells the language server about path's current on-disk content:
+// didOpen the first time, didChange whenever the content has moved on since
+// the last sync. A tool call always reads disk fresh, so a coding agent's
+// unsaved edits are invisible to Waythrough by design.
+func (p *serverProcess) syncFile(ctx context.Context, path string) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	text := string(content)
+
+	ext := filepath.Ext(path)
+	languageID, ok := p.entry.Filetypes[ext]
+	if !ok {
+		return fmt.Errorf("no languageId configured for extension %q", ext)
+	}
+
+	p.mu.Lock()
+	server := p.server
+	prev, wasOpen := p.openFiles[path]
+	p.mu.Unlock()
+
+	docURI := uri.File(path)
+
+	if !wasOpen {
+		err = server.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
+			TextDocument: protocol.TextDocumentItem{
+				URI:        docURI,
+				LanguageID: protocol.LanguageKind(languageID),
+				Version:    1,
+				Text:       text,
+			},
+		})
+		prev = openFile{content: text, version: 1}
+	} else if prev.content != text {
+		prev.version++
+		prev.content = text
+		err = server.DidChange(ctx, &protocol.DidChangeTextDocumentParams{
+			TextDocument: protocol.VersionedTextDocumentIdentifier{
+				TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: docURI},
+				Version:                prev.version,
+			},
+			ContentChanges: []protocol.TextDocumentContentChangeEvent{
+				&protocol.TextDocumentContentChangeWholeDocument{Text: text},
+			},
+		})
+	}
+	if err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	if p.openFiles == nil {
+		p.openFiles = make(map[string]openFile)
+	}
+	p.openFiles[path] = prev
+	p.mu.Unlock()
+
+	return nil
 }
 
 // beginAttempt resets per-attempt state at the start of every spawn,
@@ -295,6 +461,7 @@ func (p *serverProcess) beginAttempt() {
 	p.exitedCh = make(chan struct{})
 	p.active = nil
 	p.everSawToken = false
+	p.openFiles = nil
 	p.status = StatusStarting
 }
 

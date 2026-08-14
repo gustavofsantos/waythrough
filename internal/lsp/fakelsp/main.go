@@ -21,18 +21,23 @@ type message struct {
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
+	Error   json.RawMessage `json:"error,omitempty"`
 }
 
 var (
-	writeMu       sync.Mutex
-	out           = bufio.NewWriter(os.Stdout)
-	nextID        = 1000
-	nextIDMu      sync.Mutex
-	progress      = flag.Bool("progress", false, "report a workDoneProgress cycle for the initial load, if the client advertised support")
-	progressDelay = flag.Duration("progress-delay", 20*time.Millisecond, "time between the progress begin and end notifications")
-	crash         = flag.Bool("crash", false, "exit(1) immediately instead of speaking the protocol, to simulate a server that fails to start")
-	crashMarker   = flag.String("crash-marker", "", "path to a marker file: crash once if it does not exist yet, then behave normally on every later run")
-	ignoreExit    = flag.Bool("ignore-exit", false, "acknowledge shutdown but never act on exit, to simulate a server that will not stop on its own")
+	writeMu          sync.Mutex
+	out              = bufio.NewWriter(os.Stdout)
+	nextID           = 1000
+	nextIDMu         sync.Mutex
+	progress         = flag.Bool("progress", false, "report a workDoneProgress cycle for the initial load, if the client advertised support")
+	progressDelay    = flag.Duration("progress-delay", 20*time.Millisecond, "time between the progress begin and end notifications")
+	crash            = flag.Bool("crash", false, "exit(1) immediately instead of speaking the protocol, to simulate a server that fails to start")
+	crashMarker      = flag.String("crash-marker", "", "path to a marker file: crash once if it does not exist yet, then behave normally on every later run")
+	ignoreExit       = flag.Bool("ignore-exit", false, "acknowledge shutdown but never act on exit, to simulate a server that will not stop on its own")
+	definitionLine   = flag.Int("definition-line", -1, "0-based line to answer textDocument/definition with, in the requested document; negative means no definition")
+	definitionColumn = flag.Int("definition-column", 0, "0-based character to answer textDocument/definition with")
+
+	openDocs = map[string]bool{}
 )
 
 func main() {
@@ -71,6 +76,10 @@ func main() {
 			}
 			out.Flush()
 			os.Exit(0)
+		case "textDocument/didOpen", "textDocument/didChange":
+			openDocs[documentURI(msg.Params)] = true
+		case "textDocument/definition":
+			handleDefinition(msg)
 		}
 	}
 }
@@ -84,6 +93,49 @@ func handleInitialize(msg message) {
 
 func respond(id json.RawMessage, result string) {
 	writeMessage(message{JSONRPC: "2.0", ID: id, Result: json.RawMessage(result)})
+}
+
+func respondError(id json.RawMessage, code int, msg string) {
+	writeMessage(message{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   json.RawMessage(fmt.Sprintf(`{"code":%d,"message":%q}`, code, msg)),
+	})
+}
+
+// documentURI reads the textDocument.uri field common to didOpen, didChange,
+// and definition params.
+func documentURI(params json.RawMessage) string {
+	var v struct {
+		TextDocument struct {
+			URI string `json:"uri"`
+		} `json:"textDocument"`
+	}
+	if err := json.Unmarshal(params, &v); err != nil {
+		return ""
+	}
+	return v.TextDocument.URI
+}
+
+// handleDefinition answers textDocument/definition. It errors if the
+// document was never opened, so a test can tell whether Waythrough synced
+// the file before asking about it, and otherwise returns the location the
+// -definition-line/-definition-column flags describe, or null if
+// -definition-line is negative.
+func handleDefinition(msg message) {
+	docURI := documentURI(msg.Params)
+	if !openDocs[docURI] {
+		respondError(msg.ID, -32000, fmt.Sprintf("document not open: %s", docURI))
+		return
+	}
+	if *definitionLine < 0 {
+		respond(msg.ID, "null")
+		return
+	}
+	respond(msg.ID, fmt.Sprintf(
+		`{"uri":%q,"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}}`,
+		docURI, *definitionLine, *definitionColumn, *definitionLine, *definitionColumn,
+	))
 }
 
 // workDoneProgressAdvertised reports whether the client's initialize params
