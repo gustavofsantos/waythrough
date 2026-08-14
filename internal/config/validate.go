@@ -9,13 +9,17 @@ import (
 // Waythrough needs to start it and route files to it.
 func Validate(cfg Config) error {
 	var errs []error
+	seenNames := make(map[string]bool, len(cfg.LanguageServers))
 
 	for i, entry := range cfg.LanguageServers {
 		id := entryID(entry, i)
 
 		if entry.Name == "" {
 			errs = append(errs, fmt.Errorf("%s: missing name", id))
+		} else if seenNames[entry.Name] {
+			errs = append(errs, fmt.Errorf("%s: duplicate name %q", id, entry.Name))
 		}
+		seenNames[entry.Name] = true
 		if entry.Command == "" {
 			errs = append(errs, fmt.Errorf("%s: missing command", id))
 		}

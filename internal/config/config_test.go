@@ -84,6 +84,22 @@ var _ = Describe("Validate", func() {
 		})
 	})
 
+	When("two entries share the same name", func() {
+		It("names the duplicate", func() {
+			cfg := valid()
+			cfg.LanguageServers = append(cfg.LanguageServers, config.LanguageServer{
+				Name:      "clojure-lsp",
+				Command:   "clojure-lsp-alt",
+				Filetypes: map[string]string{".cljc": "clojure"},
+			})
+
+			err := config.Validate(cfg)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("clojure-lsp"))
+			Expect(err.Error()).To(ContainSubstring("duplicate"))
+		})
+	})
+
 	When("an entry is missing its command", func() {
 		It("names the missing field and the entry", func() {
 			cfg := valid()
