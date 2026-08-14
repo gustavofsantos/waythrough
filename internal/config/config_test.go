@@ -100,6 +100,23 @@ var _ = Describe("Validate", func() {
 		})
 	})
 
+	When("two entries claim the same filetype", func() {
+		It("names the extension and both entries", func() {
+			cfg := valid()
+			cfg.LanguageServers = append(cfg.LanguageServers, config.LanguageServer{
+				Name:      "clojure-lsp-alt",
+				Command:   "clojure-lsp-alt",
+				Filetypes: map[string]string{".clj": "clojure"},
+			})
+
+			err := config.Validate(cfg)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(".clj"))
+			Expect(err.Error()).To(ContainSubstring("clojure-lsp"))
+			Expect(err.Error()).To(ContainSubstring("clojure-lsp-alt"))
+		})
+	})
+
 	When("an entry is missing its command", func() {
 		It("names the missing field and the entry", func() {
 			cfg := valid()

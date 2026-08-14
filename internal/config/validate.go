@@ -10,6 +10,7 @@ import (
 func Validate(cfg Config) error {
 	var errs []error
 	seenNames := make(map[string]bool, len(cfg.LanguageServers))
+	owner := make(map[string]string) // filetype extension -> owning entry id
 
 	for i, entry := range cfg.LanguageServers {
 		id := entryID(entry, i)
@@ -29,6 +30,14 @@ func Validate(cfg Config) error {
 		if !validReadiness(entry.Readiness) {
 			errs = append(errs, fmt.Errorf("%s: invalid readiness %q (want %q or %q)",
 				id, entry.Readiness, ReadinessProgress, ReadinessHandshake))
+		}
+
+		for ext := range entry.Filetypes {
+			if other, claimed := owner[ext]; claimed {
+				errs = append(errs, fmt.Errorf("%s: filetype %q is already claimed by %s", id, ext, other))
+				continue
+			}
+			owner[ext] = id
 		}
 	}
 
