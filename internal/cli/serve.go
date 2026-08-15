@@ -67,7 +67,7 @@ func runServe(configPath string) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
-	manager.Shutdown(shutdownCtx)
+	_ = manager.Shutdown(shutdownCtx)
 
 	return runErr
 }

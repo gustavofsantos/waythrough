@@ -43,7 +43,7 @@ func connect(ctx context.Context, manager *lsp.Manager, cfg config.Config) *mcp.
 	session, err := client.Connect(ctx, clientTransport, nil)
 	Expect(err).NotTo(HaveOccurred())
 
-	DeferCleanup(func() { session.Close() })
+	DeferCleanup(func() { _ = session.Close() })
 	return session
 }
 

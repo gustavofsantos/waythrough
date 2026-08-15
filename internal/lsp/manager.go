@@ -715,7 +715,7 @@ func (p *serverProcess) wait() {
 	if cmd == nil {
 		return
 	}
-	cmd.Wait()
+	_ = cmd.Wait()
 	close(exited)
 }
 

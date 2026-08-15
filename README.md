@@ -18,3 +18,29 @@ This project is in early setup. The server has no features yet.
 ```
 go build ./...
 ```
+
+## Validation
+
+The script `scripts/check.sh` runs checks on the code:
+
+- format
+- vet
+- lint
+- build
+- Go module files
+- tests
+
+GitHub Actions runs this script for every pull request.
+
+Run this command one time, after you clone the repository:
+
+```
+./scripts/install-git-hooks.sh
+```
+
+This command installs the same script as a pre-commit hook. Git does not
+track the `.git/hooks` directory, so each clone needs this step.
+
+Note: the pre-commit hook checks your full working tree. It does not check
+only the staged files. Uncommitted changes to tracked files can change the
+result.

@@ -62,7 +62,7 @@ func main() {
 
 	if *crashMarker != "" {
 		if _, err := os.Stat(*crashMarker); err != nil {
-			os.WriteFile(*crashMarker, []byte("crashed"), 0o644)
+			_ = os.WriteFile(*crashMarker, []byte("crashed"), 0o644)
 			os.Exit(1)
 		}
 	}
@@ -87,7 +87,7 @@ func main() {
 			if *ignoreExit {
 				continue
 			}
-			out.Flush()
+			_ = out.Flush()
 			os.Exit(0)
 		case "textDocument/didOpen", "textDocument/didChange":
 			openDocs[documentURI(msg.Params)] = true
@@ -291,7 +291,7 @@ func readMessage(r *bufio.Reader) (message, error) {
 		if line == "\r\n" {
 			break
 		}
-		fmt.Sscanf(line, "Content-Length: %d", &length)
+		_, _ = fmt.Sscanf(line, "Content-Length: %d", &length)
 	}
 
 	body := make([]byte, length)
@@ -314,6 +314,6 @@ func writeMessage(msg message) {
 
 	writeMu.Lock()
 	defer writeMu.Unlock()
-	fmt.Fprintf(out, "Content-Length: %d\r\n\r\n%s", len(body), body)
-	out.Flush()
+	_, _ = fmt.Fprintf(out, "Content-Length: %d\r\n\r\n%s", len(body), body)
+	_ = out.Flush()
 }
