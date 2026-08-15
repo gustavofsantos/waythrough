@@ -14,7 +14,7 @@ Antigravity are coding agents. Waythrough gives the agent the same
 
 ## Status
 
-This project is in early setup. It has four MCP tools. Tests run
+This project is in early setup. It has five MCP tools. Tests run
 them against a test language server, not against a real one yet.
 
 ## Install
@@ -80,6 +80,9 @@ Waythrough exposes these MCP tools to a connected coding agent:
 - `signature_help` — list the signatures a call could match, given a
   file position inside that call. It also says which signature and
   which parameter the position is on.
+- `get_diagnostics` — list the problems a language server finds in a
+  file. The language server must support pull diagnostics. A server
+  that only pushes its diagnostics reports none here.
 
 ## Learn more
 

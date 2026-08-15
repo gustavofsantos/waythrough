@@ -50,11 +50,15 @@ var (
 	renameOtherCol   = flag.Int("rename-other-column", 0, "0-based character where the canned edit in -rename-other-file starts")
 	renameOtherLen   = flag.Int("rename-other-length", 0, "number of characters the canned edit in -rename-other-file replaces")
 	signatureHelp    = flag.String("signature-help", "", "raw JSON result to answer textDocument/signatureHelp with; empty means no signature help (null). A signature help result nests signatures, per-parameter labels, and two levels of active-index, so a test states the whole canned payload here rather than through one scalar flag per field")
+	pullDiagnostics  = flag.Bool("pull-diagnostics", false, "advertise diagnosticProvider in the initialize result, the capability a client must see before it may ask for diagnostics")
+	diagnostics      = flag.String("diagnostics", "", "raw JSON result to answer textDocument/diagnostic with, in the same spirit as -signature-help; empty means a full report holding no diagnostics, which is what a clean file gets")
+	requestLog       = flag.String("request-log", "", "path to a file that receives the method name of every request and notification handled, one per line — lets a test assert Waythrough never sent a request at all, not merely that it disliked the answer")
 	syncLog          = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
 
-	openDocs    = map[string]bool{}
-	syncLogFile *os.File
-	syncLogMu   sync.Mutex
+	openDocs       = map[string]bool{}
+	syncLogFile    *os.File
+	requestLogFile *os.File
+	logMu          sync.Mutex
 )
 
 func main() {
@@ -71,14 +75,8 @@ func main() {
 		}
 	}
 
-	if *syncLog != "" {
-		f, err := os.OpenFile(*syncLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "sync-log:", err)
-			os.Exit(1)
-		}
-		syncLogFile = f
-	}
+	syncLogFile = openLog("sync-log", *syncLog)
+	requestLogFile = openLog("request-log", *requestLog)
 
 	r := bufio.NewReader(os.Stdin)
 	for {
@@ -86,6 +84,7 @@ func main() {
 		if err != nil {
 			return
 		}
+		logRequest(msg.Method)
 
 		switch msg.Method {
 		case "initialize":
@@ -113,6 +112,8 @@ func main() {
 			handleRename(msg)
 		case "textDocument/signatureHelp":
 			handleSignatureHelp(msg)
+		case "textDocument/diagnostic":
+			handleDiagnostic(msg)
 		}
 	}
 }
@@ -121,7 +122,13 @@ var lastInitializeParams json.RawMessage
 
 func handleInitialize(msg message) {
 	lastInitializeParams = msg.Params
-	respond(msg.ID, `{"capabilities":{}}`)
+
+	capabilities := ""
+	if *pullDiagnostics {
+		capabilities = `"diagnosticProvider":` +
+			`{"interFileDependencies":false,"workspaceDiagnostics":false}`
+	}
+	respond(msg.ID, fmt.Sprintf(`{"capabilities":{%s}}`, capabilities))
 }
 
 func respond(id json.RawMessage, result string) {
@@ -148,6 +155,31 @@ func documentURI(params json.RawMessage) string {
 		return ""
 	}
 	return v.TextDocument.URI
+}
+
+// openLog opens one of the append-only log files a test reads afterwards.
+// An empty path means the test asked for no such log.
+func openLog(name, path string) *os.File {
+	if path == "" {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, name+":", err)
+		os.Exit(1)
+	}
+	return f
+}
+
+// logRequest appends one method name to -request-log, if set, for every
+// message handled, whether or not this fake answers it.
+func logRequest(method string) {
+	if requestLogFile == nil || method == "" {
+		return
+	}
+	logMu.Lock()
+	defer logMu.Unlock()
+	_, _ = fmt.Fprintln(requestLogFile, method)
 }
 
 // logSyncEvent appends one JSON line to -sync-log, if set, recording the
@@ -188,8 +220,8 @@ func logSyncEvent(method string, params json.RawMessage) {
 		return
 	}
 
-	syncLogMu.Lock()
-	defer syncLogMu.Unlock()
+	logMu.Lock()
+	defer logMu.Unlock()
 	_, _ = syncLogFile.Write(append(line, '\n'))
 }
 
@@ -297,6 +329,23 @@ func handleSignatureHelp(msg message) {
 		return
 	}
 	respond(msg.ID, *signatureHelp)
+}
+
+// handleDiagnostic answers textDocument/diagnostic. Like handleDefinition,
+// it errors if the document was never opened, and otherwise echoes the
+// -diagnostics payload back verbatim, or a full report holding nothing when
+// that flag is empty, which is the answer a clean file gets.
+func handleDiagnostic(msg message) {
+	docURI := documentURI(msg.Params)
+	if !openDocs[docURI] {
+		respondError(msg.ID, -32000, fmt.Sprintf("document not open: %s", docURI))
+		return
+	}
+	if *diagnostics == "" {
+		respond(msg.ID, `{"kind":"full","items":[]}`)
+		return
+	}
+	respond(msg.ID, *diagnostics)
 }
 
 func canonEdit(line, column, length int, newText string) string {

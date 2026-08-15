@@ -43,6 +43,12 @@ func New(manager *lsp.Manager, cfg config.Config) *mcp.Server {
 			"and say which signature and which parameter that position is on. " +
 			"Use it inside a call to learn what the next argument must be.",
 	}, e.signatureHelp)
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "get_diagnostics",
+		Description: "List the problems a language server finds in a file: where each " +
+			"one is, how serious it is, and what it says. Use it instead of reading " +
+			"compiler or linter output by hand.",
+	}, e.getDiagnostics)
 
 	return server
 }
@@ -105,6 +111,27 @@ type edit struct {
 
 type editsOutput struct {
 	Edits []edit `json:"edits"`
+}
+
+// document is the input of a tool that asks about a file as a whole, rather
+// than about one position in it.
+type document struct {
+	File string `json:"file" jsonschema:"file path, absolute or relative to the project root"`
+}
+
+type diagnostic struct {
+	StartLine   int    `json:"start_line"`
+	StartColumn int    `json:"start_column"`
+	EndLine     int    `json:"end_line"`
+	EndColumn   int    `json:"end_column"`
+	Severity    string `json:"severity,omitempty"`
+	Message     string `json:"message"`
+	Source      string `json:"source,omitempty"`
+	Code        string `json:"code,omitempty"`
+}
+
+type diagnosticsOutput struct {
+	Diagnostics []diagnostic `json:"diagnostics"`
 }
 
 type signature struct {
@@ -188,6 +215,23 @@ func (e *editor) signatureHelp(
 	return nil, toSignatureHelpOutput(help), nil
 }
 
+func (e *editor) getDiagnostics(
+	ctx context.Context, _ *mcp.CallToolRequest, in document,
+) (*mcp.CallToolResult, diagnosticsOutput, error) {
+	ext := filepath.Ext(in.File)
+	name, ok := e.serverForExt[ext]
+	if !ok {
+		return nil, diagnosticsOutput{},
+			fmt.Errorf("no configured language server for file extension %q", ext)
+	}
+
+	diagnostics, err := e.manager.Diagnostics(ctx, name, in.File)
+	if err != nil {
+		return nil, diagnosticsOutput{}, err
+	}
+	return nil, toDiagnosticsOutput(diagnostics), nil
+}
+
 // resolveTarget validates a 1-based position and finds which configured
 // server handles in.File's extension — the checks every editor operation
 // needs before it can ask a language server anything.
@@ -210,6 +254,23 @@ func toLocationsOutput(locations []lsp.Location) locationsOutput {
 	out := locationsOutput{Locations: make([]location, len(locations))}
 	for i, loc := range locations {
 		out.Locations[i] = location{File: loc.File, Line: loc.Line, Column: loc.Column}
+	}
+	return out
+}
+
+func toDiagnosticsOutput(diagnostics []lsp.Diagnostic) diagnosticsOutput {
+	out := diagnosticsOutput{Diagnostics: make([]diagnostic, len(diagnostics))}
+	for i, d := range diagnostics {
+		out.Diagnostics[i] = diagnostic{
+			StartLine:   d.StartLine,
+			StartColumn: d.StartColumn,
+			EndLine:     d.EndLine,
+			EndColumn:   d.EndColumn,
+			Severity:    d.Severity,
+			Message:     d.Message,
+			Source:      d.Source,
+			Code:        d.Code,
+		}
 	}
 	return out
 }

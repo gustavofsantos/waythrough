@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -104,6 +105,23 @@ type SignatureHelp struct {
 	Signatures      []Signature
 	ActiveSignature int
 	ActiveParameter int
+}
+
+// Diagnostic is one problem a language server reports in a file: where it
+// is, how serious it is, and what it says. Its range is 1-based, to match
+// Location and Edit.
+//
+// Severity, Source and Code are each empty when the server left them out.
+// The spec urges a server to always set a severity, but does not require it.
+type Diagnostic struct {
+	StartLine   int
+	StartColumn int
+	EndLine     int
+	EndColumn   int
+	Severity    string
+	Message     string
+	Source      string
+	Code        string
 }
 
 // Option configures a Manager.
@@ -381,6 +399,32 @@ func (m *Manager) SignatureHelp(
 	return signatureHelpFromProtocol(result)
 }
 
+// Diagnostics asks the named server what is wrong in file, waiting for the
+// server to be ready first and syncing the file's current on-disk content to
+// it before asking. file may be relative to Manager's root or absolute. A
+// diagnostic belongs to the file as a whole, so this takes no position.
+//
+// Only a server that advertised pull diagnostics at its handshake is asked.
+// One that reports diagnostics by pushing them instead fails here, since
+// Waythrough keeps no record of what a server pushed.
+func (m *Manager) Diagnostics(ctx context.Context, name, file string) ([]Diagnostic, error) {
+	proc, path, err := m.prepare(ctx, name, file)
+	if err != nil {
+		return nil, err
+	}
+	if !proc.supportsPullDiagnostics() {
+		return nil, fmt.Errorf("language server %q does not support pull diagnostics", name)
+	}
+
+	result, err := proc.currentServer().Diagnostic(ctx, &protocol.DocumentDiagnosticParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("diagnostic: %w", err)
+	}
+	return diagnosticsFromReport(path, result)
+}
+
 // prepare resolves file, waits for name's server to be ready, and syncs
 // file's current on-disk content to it — the setup every LSP position
 // request needs before it can ask the server anything.
@@ -523,6 +567,70 @@ func parameterLabels(signature protocol.SignatureInformation) ([]string, error) 
 	return labels, nil
 }
 
+// diagnosticsFromReport converts a pull diagnostic report into Diagnostics.
+// It handles only the full report. An unchanged report says "the same as the
+// report you already hold", which a server may only send in answer to a
+// previousResultId, and Diagnostics never sends one.
+func diagnosticsFromReport(
+	requestedPath string, report protocol.DocumentDiagnosticReport,
+) ([]Diagnostic, error) {
+	full, ok := report.(*protocol.RelatedFullDocumentDiagnosticReport)
+	if !ok {
+		return nil, fmt.Errorf(
+			"diagnostic for %s: unsupported report shape %T (no previousResultId was sent)",
+			requestedPath, report)
+	}
+
+	// full.RelatedDocuments holds diagnostics for other files this one
+	// affects. A caller asked about one file, so it gets one file's answer.
+	diagnostics := make([]Diagnostic, len(full.Items))
+	for i, item := range full.Items {
+		source, _ := item.Source.Get()
+		diagnostics[i] = Diagnostic{
+			StartLine:   int(item.Range.Start.Line) + 1,
+			StartColumn: int(item.Range.Start.Character) + 1,
+			EndLine:     int(item.Range.End.Line) + 1,
+			EndColumn:   int(item.Range.End.Character) + 1,
+			Severity:    severityName(item.Severity),
+			Message:     textFromTooltip(item.Message),
+			Source:      source,
+			Code:        codeText(item.Code),
+		}
+	}
+	return diagnostics, nil
+}
+
+// severityName gives a severity the name a reader knows it by, rather than
+// the number the protocol sends. A severity the server left out has no name.
+func severityName(severity protocol.DiagnosticSeverity) string {
+	switch severity {
+	case protocol.DiagnosticSeverityError:
+		return "error"
+	case protocol.DiagnosticSeverityWarning:
+		return "warning"
+	case protocol.DiagnosticSeverityInformation:
+		return "information"
+	case protocol.DiagnosticSeverityHint:
+		return "hint"
+	default:
+		return ""
+	}
+}
+
+// codeText flattens a diagnostic's code, which the protocol allows as either
+// a number or a string, into the text a coding agent reads. An absent code
+// flattens to the empty string.
+func codeText(code protocol.ProgressToken) string {
+	switch v := code.(type) {
+	case protocol.String:
+		return string(v)
+	case protocol.Integer:
+		return strconv.Itoa(int(v))
+	default:
+		return ""
+	}
+}
+
 // textFromTooltip flattens a field the protocol allows as either a plain
 // string or MarkupContent — a signature's documentation, a diagnostic's
 // message — into the text a coding agent reads. An absent field flattens to
@@ -640,6 +748,7 @@ type serverProcess struct {
 	mu           sync.Mutex
 	cmd          *exec.Cmd
 	server       protocol.Server
+	capabilities protocol.ServerCapabilities
 	status       Status
 	readyCh      chan struct{}
 	exitedCh     chan struct{}
@@ -661,6 +770,14 @@ func (p *serverProcess) currentServer() protocol.Server {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.server
+}
+
+// supportsPullDiagnostics reports whether this server advertised, at its
+// handshake, that a client may ask it for a file's diagnostics.
+func (p *serverProcess) supportsPullDiagnostics() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.capabilities.DiagnosticProvider != nil
 }
 
 // syncFile tells the language server about path's current on-disk content:
@@ -748,6 +865,7 @@ func (p *serverProcess) beginAttempt() {
 	p.active = nil
 	p.everSawToken = false
 	p.openFiles = nil
+	p.capabilities = protocol.ServerCapabilities{}
 	p.status = StatusStarting
 }
 
@@ -785,14 +903,22 @@ func (p *serverProcess) handshake(ctx context.Context, root string) error {
 
 	rootURI := uri.File(root)
 	workDoneProgress := true
-	if _, err := server.Initialize(ctx, &protocol.InitializeParams{
+	result, err := server.Initialize(ctx, &protocol.InitializeParams{
 		RootURI: &rootURI,
 		Capabilities: protocol.ClientCapabilities{
 			Window: &protocol.WindowClientCapabilities{WorkDoneProgress: &workDoneProgress},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
+
+	// This response is the only time the server states what it can do, so
+	// keep it: a request for a feature the server never advertised has to
+	// fail here rather than travel to a server that will not answer it.
+	p.mu.Lock()
+	p.capabilities = result.Capabilities
+	p.mu.Unlock()
 
 	if err := server.Initialized(ctx, &protocol.InitializedParams{}); err != nil {
 		return fmt.Errorf("initialized: %w", err)
