@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Installs scripts/check.sh as a git pre-commit hook. Safe to re-run.
+# Installs scripts/check.sh as a git pre-commit hook and a pre-push hook.
+# Safe to re-run.
 #
 # .git/hooks isn't tracked by git, so every clone needs to run this once:
 #   ./scripts/install-git-hooks.sh
@@ -15,18 +16,21 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 HOOKS_DIR="$(git rev-parse --git-path hooks)"
 MARKER="# WAYTHROUGH_MANAGED_HOOK"
 
-target="$HOOKS_DIR/pre-commit"
-if [ -f "$target" ] && grep -q "GITBUTLER_MANAGED_HOOK_V1" "$target"; then
-	target="$HOOKS_DIR/pre-commit-user"
-fi
+install_hook() {
+	local hook_name="$1"
+	local target="$HOOKS_DIR/$hook_name"
 
-if [ -f "$target" ] && ! grep -q "$MARKER" "$target"; then
-	backup="${target}.bak"
-	echo "Existing hook at $target was not installed by this script; backing it up to $backup"
-	mv "$target" "$backup"
-fi
+	if [ -f "$target" ] && grep -q "GITBUTLER_MANAGED_HOOK_V1" "$target"; then
+		target="$HOOKS_DIR/${hook_name}-user"
+	fi
 
-cat >"$target" <<EOF
+	if [ -f "$target" ] && ! grep -q "$MARKER" "$target"; then
+		local backup="${target}.bak"
+		echo "Existing hook at $target was not installed by this script; backing it up to $backup"
+		mv "$target" "$backup"
+	fi
+
+	cat >"$target" <<EOF
 #!/bin/sh
 $MARKER
 # Installed by scripts/install-git-hooks.sh. Edit scripts/check.sh to
@@ -34,6 +38,10 @@ $MARKER
 # needs to change.
 exec "$REPO_ROOT/scripts/check.sh"
 EOF
-chmod +x "$target"
+	chmod +x "$target"
 
-echo "Installed pre-commit hook at $target"
+	echo "Installed $hook_name hook at $target"
+}
+
+install_hook pre-commit
+install_hook pre-push

@@ -48,12 +48,16 @@ Run this command one time, after you clone the repository:
 ./scripts/install-git-hooks.sh
 ```
 
-This command installs the same script as a pre-commit hook. Git does not
-track the `.git/hooks` directory, so each clone needs this step.
+This command installs the same script as a pre-commit hook and a
+pre-push hook. Git does not track the `.git/hooks` directory, so each
+clone needs this step.
 
-Note: the pre-commit hook checks your full working tree. It does not check
-only the staged files. Uncommitted changes to tracked files can change the
-result.
+The pre-push hook runs on every push, including a release tag push, so
+a broken release never reaches GitHub Actions.
+
+Note: both hooks check your full working tree. They do not check only
+the staged or the pushed commits. Uncommitted changes to tracked files
+can change the result.
 
 ## Release
 
