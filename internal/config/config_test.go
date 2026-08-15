@@ -84,6 +84,20 @@ var _ = Describe("Validate", func() {
 		})
 	})
 
+	When("an entry is missing its name", func() {
+		It("names the missing field and identifies the entry by index", func() {
+			cfg := valid()
+			cfg.LanguageServers[0].Name = ""
+
+			err := config.Validate(cfg)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("missing name"))
+			// The entry's own name is what's missing, so unlike every other
+			// validation error here, it must identify the entry by index.
+			Expect(err.Error()).To(ContainSubstring("entry #0"))
+		})
+	})
+
 	When("two entries share the same name", func() {
 		It("names the duplicate", func() {
 			cfg := valid()
