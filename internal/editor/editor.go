@@ -46,6 +46,14 @@ type editor struct {
 	serverForExt map[string]string
 }
 
+// routeByExtension builds the extension-to-server routing table.
+//
+// Precondition: config.Validate(cfg) returned no error. It is the one
+// enforcer of the rule this table depends on — at most one entry claims any
+// one extension. Given a config that breaks it, the last entry to claim an
+// extension wins here, in silence, and an agent gets answers from a server
+// it never picked. cmd/waythrough reaches this only through serve, which
+// validates first (internal/cli/serve.go), and a CLI test pins that.
 func routeByExtension(cfg config.Config) map[string]string {
 	routes := make(map[string]string)
 	for _, entry := range cfg.LanguageServers {

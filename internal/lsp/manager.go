@@ -118,6 +118,11 @@ func WithToolCallTimeout(d time.Duration) Option {
 
 // NewManager builds a Manager for entries. root is the project directory
 // passed to each language server as its workspace root.
+//
+// Precondition: config.Validate returned no error for the config entries
+// came from. procs is keyed by entry name, so two entries sharing a name
+// would collapse into one process here, in silence, and the second would
+// never start. config.Validate is the one enforcer of that uniqueness.
 func NewManager(root string, entries []config.LanguageServer, opts ...Option) *Manager {
 	m := &Manager{
 		root:             root,

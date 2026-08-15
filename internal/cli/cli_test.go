@@ -18,6 +18,22 @@ func writeConfigFile(path, content string) {
 	Expect(os.WriteFile(path, []byte(content), 0o644)).To(Succeed())
 }
 
+// twoServersOneExtension breaks the one-server-per-extension rule, the
+// invariant every command that reads a config must refuse to run against.
+// The two entry names are deliberately not prefixes of one another, so an
+// assertion naming one cannot pass on the other.
+const twoServersOneExtension = `
+language_servers:
+  - name: clojure-lsp
+    command: clojure-lsp
+    filetypes:
+      .clj: clojure
+  - name: clj-kondo-lsp
+    command: clj-kondo-lsp
+    filetypes:
+      .clj: clojure
+`
+
 var _ = Describe("waythrough CLI", func() {
 	var (
 		configPath string
@@ -130,6 +146,43 @@ language_servers:
 				code := run("validate", "--config", configPath)
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).NotTo(BeEmpty())
+			})
+		})
+
+		When("two entries claim the same file extension", func() {
+			BeforeEach(func() { writeConfigFile(configPath, twoServersOneExtension) })
+
+			It("exits non-zero and names the extension and both entries", func() {
+				code := run("validate", "--config", configPath)
+				Expect(code).NotTo(Equal(0))
+				Expect(stderr.String()).To(ContainSubstring("already claimed"))
+				Expect(stderr.String()).To(ContainSubstring(".clj"))
+				Expect(stderr.String()).To(ContainSubstring("clojure-lsp"))
+				Expect(stderr.String()).To(ContainSubstring("clj-kondo-lsp"))
+			})
+		})
+	})
+
+	// serve is covered here only for configs it must reject. A config it
+	// accepts sends serve into mcp.Server.Run on a stdio transport, which
+	// reads the test binary's own stdin. What that returns depends on how
+	// the suite was started, so there is nothing stable to assert on.
+	Describe("serve", func() {
+		When("two entries claim the same file extension", func() {
+			BeforeEach(func() { writeConfigFile(configPath, twoServersOneExtension) })
+
+			// One extension routes to exactly one language server. Waythrough
+			// resolves a file to a server by its extension alone, so a second
+			// claim on .clj leaves the routing table to pick a winner in
+			// silence, and an agent gets definitions from whichever entry came
+			// last. serve must refuse before it spawns a single subprocess.
+			It("refuses to start, and names the extension and both entries", func() {
+				code := run("serve", "--config", configPath)
+				Expect(code).NotTo(Equal(0))
+				Expect(stderr.String()).To(ContainSubstring("already claimed"))
+				Expect(stderr.String()).To(ContainSubstring(".clj"))
+				Expect(stderr.String()).To(ContainSubstring("clojure-lsp"))
+				Expect(stderr.String()).To(ContainSubstring("clj-kondo-lsp"))
 			})
 		})
 	})
