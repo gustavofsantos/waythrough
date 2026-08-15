@@ -49,8 +49,11 @@ var (
 	renameOtherLine  = flag.Int("rename-other-line", 0, "0-based line of the canned edit in -rename-other-file")
 	renameOtherCol   = flag.Int("rename-other-column", 0, "0-based character where the canned edit in -rename-other-file starts")
 	renameOtherLen   = flag.Int("rename-other-length", 0, "number of characters the canned edit in -rename-other-file replaces")
+	syncLog          = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
 
-	openDocs = map[string]bool{}
+	openDocs    = map[string]bool{}
+	syncLogFile *os.File
+	syncLogMu   sync.Mutex
 )
 
 func main() {
@@ -65,6 +68,15 @@ func main() {
 			_ = os.WriteFile(*crashMarker, []byte("crashed"), 0o644)
 			os.Exit(1)
 		}
+	}
+
+	if *syncLog != "" {
+		f, err := os.OpenFile(*syncLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "sync-log:", err)
+			os.Exit(1)
+		}
+		syncLogFile = f
 	}
 
 	r := bufio.NewReader(os.Stdin)
@@ -91,6 +103,7 @@ func main() {
 			os.Exit(0)
 		case "textDocument/didOpen", "textDocument/didChange":
 			openDocs[documentURI(msg.Params)] = true
+			logSyncEvent(msg.Method, msg.Params)
 		case "textDocument/definition":
 			handleDefinition(msg)
 		case "textDocument/references":
@@ -132,6 +145,49 @@ func documentURI(params json.RawMessage) string {
 		return ""
 	}
 	return v.TextDocument.URI
+}
+
+// logSyncEvent appends one JSON line to -sync-log, if set, recording the
+// document text a didOpen/didChange notification actually carried — a
+// didOpen's own textDocument.text, or a didChange's first contentChanges
+// entry, since Waythrough only ever sends whole-document changes.
+func logSyncEvent(method string, params json.RawMessage) {
+	if syncLogFile == nil {
+		return
+	}
+
+	var v struct {
+		TextDocument struct {
+			URI     string `json:"uri"`
+			Version int32  `json:"version"`
+			Text    string `json:"text"`
+		} `json:"textDocument"`
+		ContentChanges []struct {
+			Text string `json:"text"`
+		} `json:"contentChanges"`
+	}
+	if err := json.Unmarshal(params, &v); err != nil {
+		return
+	}
+
+	text := v.TextDocument.Text
+	if len(v.ContentChanges) > 0 {
+		text = v.ContentChanges[0].Text
+	}
+
+	line, err := json.Marshal(struct {
+		Method  string `json:"method"`
+		URI     string `json:"uri"`
+		Version int32  `json:"version"`
+		Text    string `json:"text"`
+	}{Method: method, URI: v.TextDocument.URI, Version: v.TextDocument.Version, Text: text})
+	if err != nil {
+		return
+	}
+
+	syncLogMu.Lock()
+	defer syncLogMu.Unlock()
+	_, _ = syncLogFile.Write(append(line, '\n'))
 }
 
 // handleDefinition answers textDocument/definition. It errors if the

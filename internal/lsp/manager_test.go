@@ -2,8 +2,10 @@ package lsp_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,6 +14,31 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
 )
+
+// syncEvent mirrors one JSON line fakelsp's -sync-log writes on every
+// didOpen/didChange, letting a test see the content and version Waythrough
+// actually sent, not merely that some document is open.
+type syncEvent struct {
+	Method  string `json:"method"`
+	Version int32  `json:"version"`
+	Text    string `json:"text"`
+}
+
+func readSyncLog(path string) []syncEvent {
+	data, err := os.ReadFile(path)
+	Expect(err).NotTo(HaveOccurred())
+
+	var events []syncEvent
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e syncEvent
+		Expect(json.Unmarshal([]byte(line), &e)).To(Succeed())
+		events = append(events, e)
+	}
+	return events
+}
 
 var _ = Describe("Manager", func() {
 	var (
@@ -173,6 +200,68 @@ var _ = Describe("Manager", func() {
 
 			Eventually(done, time.Second).Should(BeClosed(),
 				"Shutdown should kill a server that ignores exit rather than hang")
+		})
+	})
+
+	Describe("syncing a file's content", func() {
+		var (
+			file    string
+			syncLog string
+			manager *lsp.Manager
+		)
+
+		BeforeEach(func() {
+			root := GinkgoT().TempDir()
+			file = filepath.Join(root, "main.fake")
+			Expect(os.WriteFile(file, []byte("hello world"), 0o644)).To(Succeed())
+
+			syncLog = filepath.Join(GinkgoT().TempDir(), "sync.log")
+			entry := config.LanguageServer{
+				Name:      "fake",
+				Command:   fakelspPath,
+				Args:      []string{"-sync-log=" + syncLog},
+				Readiness: config.ReadinessHandshake,
+				Filetypes: map[string]string{".fake": "fake"},
+			}
+
+			manager = lsp.NewManager(root, []config.LanguageServer{entry})
+			Expect(manager.Start(ctx)).To(Succeed())
+			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
+		})
+
+		It("sends the file's actual content via didOpen, at version 1, on the first sync", func() {
+			_, err := manager.Definition(ctx, "fake", file, 1, 1)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(readSyncLog(syncLog)).To(Equal([]syncEvent{
+				{Method: "textDocument/didOpen", Version: 1, Text: "hello world"},
+			}))
+		})
+
+		It("sends the new content via didChange, with the version bumped, when the file has changed since the last sync", func() {
+			_, err := manager.Definition(ctx, "fake", file, 1, 1)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(os.WriteFile(file, []byte("hello galaxy"), 0o644)).To(Succeed())
+
+			_, err = manager.Definition(ctx, "fake", file, 1, 1)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(readSyncLog(syncLog)).To(Equal([]syncEvent{
+				{Method: "textDocument/didOpen", Version: 1, Text: "hello world"},
+				{Method: "textDocument/didChange", Version: 2, Text: "hello galaxy"},
+			}))
+		})
+
+		It("sends nothing further while the file's content matches what was last synced", func() {
+			_, err := manager.Definition(ctx, "fake", file, 1, 1)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = manager.Definition(ctx, "fake", file, 1, 1)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(readSyncLog(syncLog)).To(HaveLen(1),
+				"a second sync with unchanged content should not resend didOpen or didChange")
 		})
 	})
 })
