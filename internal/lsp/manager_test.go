@@ -210,6 +210,27 @@ var _ = Describe("Manager", func() {
 			Eventually(done, time.Second).Should(BeClosed(),
 				"Shutdown should kill a server that ignores exit rather than hang")
 		})
+
+		It("does not panic when shutting down a server that never spawned a process", func() {
+			entry := config.LanguageServer{
+				Name:      "fake",
+				Command:   filepath.Join(GinkgoT().TempDir(), "no-such-binary"),
+				Filetypes: map[string]string{".fake": "fake"},
+			}
+
+			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
+				lsp.WithRestartLimit(0, time.Minute))
+			Expect(manager.Start(ctx)).To(Succeed())
+
+			err := manager.WaitReady(ctx, "fake", 2*time.Second)
+			Expect(err).To(HaveOccurred(), "the command does not exist, so the server should fail to start")
+
+			status, err := manager.Status("fake")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal(lsp.StatusFailed))
+
+			Expect(manager.Shutdown(ctx)).To(Succeed())
+		})
 	})
 
 	Describe("syncing a file's content", func() {
