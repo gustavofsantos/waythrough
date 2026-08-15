@@ -1,81 +1,87 @@
 # Waythrough
 
-Waythrough is a Model Context Protocol (MCP) server. It connects coding
-agents to Language Server Protocol (LSP) servers. Claude Code, Codex, and
-Antigravity are coding agents.
+A coding agent without a language server guesses at your code. It reads
+text and looks for matching names. It does not know a symbol's
+definition, and it does not know every place that uses it.
 
-Waythrough starts each LSP server. It manages the lifecycle of each LSP
-server. Its own lifecycle controls the LSP server lifecycle. It starts a new
-LSP server when the old one stops. It gives coding agents the LSP features
-of a modern editor.
+Waythrough closes that gap. Waythrough is a Model Context Protocol
+(MCP) server. It starts and manages Language Server Protocol (LSP)
+servers. It offers their features to the agent as MCP tools.
+
+Point a coding agent at Waythrough. Claude Code, Codex, and
+Antigravity are coding agents. Waythrough gives the agent the same
+"go to definition" and "find references" power as a modern editor.
 
 ## Status
 
-This project is in early setup. The server has no features yet.
+This project is in early setup. It has three MCP tools. Tests run
+them against a test language server, not against a real one yet.
 
 ## Install
 
-Waythrough publishes binaries for Linux and macOS. This repository is
+Waythrough publishes binaries for Linux and macOS. This project is
 also its own Homebrew tap. Run these commands to install it:
 
-```
+```sh
 brew tap gustavofsantos/waythrough https://github.com/gustavofsantos/waythrough
 brew install waythrough
 ```
 
-## Build
+## Quick start
 
-```
-go build ./...
-```
+1. Create a `waythrough.yaml` file in your project root. Each entry
+   names a language server, the command that starts it, and the file
+   extensions it handles:
 
-## Validation
+   ```yaml
+   language_servers:
+     - name: gopls
+       command: gopls
+       args: []
+       filetypes:
+         .go: go
+   ```
 
-The script `scripts/check.sh` runs checks on the code:
+   Run `waythrough init` to write a starter config for Clojure
+   instead. Edit it for your own language servers. Then run
+   `waythrough validate` to check the file for errors.
 
-- format
-- vet
-- lint
-- build
-- Go module files
-- tests
+2. Add Waythrough as an MCP server in your coding agent's config.
+   Pass an absolute path to `--config`, so Waythrough finds
+   `waythrough.yaml` no matter where the agent starts it from. The
+   agent starts Waythrough over stdio:
 
-GitHub Actions runs this script for every pull request.
+   ```json
+   {
+     "mcpServers": {
+       "waythrough": {
+         "command": "waythrough",
+         "args": ["serve", "--config", "/absolute/path/to/waythrough.yaml"]
+       }
+     }
+   }
+   ```
 
-Run this command one time, after you clone the repository:
+3. Ask your coding agent to find a definition or list references. The
+   agent calls Waythrough's MCP tools. Waythrough forwards the
+   request to the language server for that file type.
 
-```
-./scripts/install-git-hooks.sh
-```
+## Tools
 
-This command installs the same script as a pre-commit hook and a
-pre-push hook. Git does not track the `.git/hooks` directory, so each
-clone needs this step.
+Waythrough exposes these MCP tools to a connected coding agent:
 
-The pre-push hook runs on every push, including a release tag push, so
-a broken release never reaches GitHub Actions.
+- `get_definition` — find where a symbol's definition is, given a
+  file position.
+- `list_references` — find every place that uses a symbol, given a
+  file position.
+- `rename_symbol` — build the list of edits that rename a symbol,
+  across every file it touches. It does not write the edits to disk.
+  Your agent applies them.
 
-Note: both hooks check your full working tree. They do not check only
-the staged or the pushed commits. Uncommitted changes to tracked files
-can change the result.
+## Learn more
 
-## Release
-
-A tag push in the form `vX.Y.Z` starts the release. GitHub Actions
-then runs GoReleaser.
-
-GoReleaser builds a binary for Linux and a binary for macOS. It builds
-each one for amd64 and for arm64. It publishes a GitHub release with
-these binaries.
-
-GoReleaser also pushes a new formula to `Formula/waythrough.rb` in this
-same repository, as a commit on `main`. This step makes
-`brew install waythrough` install the new version. This needs no extra
-secret, because the workflow's own `GITHUB_TOKEN` can push to its own
-repository.
-
-Run this command to preview a build without a tag push:
-
-```
-goreleaser release --snapshot --clean --skip=publish
-```
+- [CONTRIBUTING.md](CONTRIBUTING.md) — set up your tools, run the
+  checks, and submit a change.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the file layout
+  and how a request flows through the code.
+- [LICENSE](LICENSE) — the license for Waythrough.
