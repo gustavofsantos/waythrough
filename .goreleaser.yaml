@@ -2,6 +2,10 @@ version: 2
 
 project_name: waythrough
 
+before:
+  hooks:
+    - ./scripts/check.sh
+
 builds:
   - id: waythrough
     main: ./cmd/waythrough
