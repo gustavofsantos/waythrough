@@ -426,12 +426,8 @@ func filePathFromURI(docURI uri.URI) string {
 }
 
 func locationFromProtocol(loc protocol.Location) Location {
-	platform := uri.PlatformPOSIX
-	if runtime.GOOS == "windows" {
-		platform = uri.PlatformWindows
-	}
 	return Location{
-		File:   uri.FsPathFor(loc.URI, platform, false),
+		File:   filePathFromURI(loc.URI),
 		Line:   int(loc.Range.Start.Line) + 1,
 		Column: int(loc.Range.Start.Character) + 1,
 	}

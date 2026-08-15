@@ -70,9 +70,7 @@ type locationsOutput struct {
 }
 
 type renamePosition struct {
-	File    string `json:"file" jsonschema:"path to the file, absolute or relative to the project root"`
-	Line    int    `json:"line" jsonschema:"1-based line number"`
-	Column  int    `json:"column" jsonschema:"1-based column number"`
+	position
 	NewName string `json:"new_name" jsonschema:"the new name to give the symbol"`
 }
 
@@ -123,7 +121,7 @@ func (e *editor) renameSymbol(ctx context.Context, _ *mcp.CallToolRequest, in re
 		return nil, editsOutput{}, fmt.Errorf("new_name must not be empty")
 	}
 
-	name, err := e.resolveTarget(position{File: in.File, Line: in.Line, Column: in.Column})
+	name, err := e.resolveTarget(in.position)
 	if err != nil {
 		return nil, editsOutput{}, err
 	}
