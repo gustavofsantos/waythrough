@@ -81,10 +81,11 @@ Waythrough exposes these MCP tools to a connected coding agent:
   file position inside that call. It also says which signature and
   which parameter the position is on.
 - `get_diagnostics` — list the problems a language server finds in a
-  file. The language server must support pull diagnostics. A server
-  that only pushes its diagnostics fails the call with an error that
-  names it, rather than reporting a clean file. `gopls` is such a
-  server today.
+  file. The language server must advertise pull diagnostics at its
+  handshake. One that does not fails the call with an error naming it,
+  rather than reporting a clean file. `gopls` pushes its diagnostics
+  by default and advertises no pull support, so it fails this call
+  today.
 
 ## Learn more
 
