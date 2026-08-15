@@ -49,6 +49,12 @@ func New(manager *lsp.Manager, cfg config.Config) *mcp.Server {
 			"one is, how serious it is, and what it says. Use it instead of reading " +
 			"compiler or linter output by hand.",
 	}, e.getDiagnostics)
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "restart_server",
+		Description: "Restart one language server by name, and wait until its " +
+			"replacement can answer. Use it when a server's answers no longer " +
+			"match the code on disk. Every other language server keeps running.",
+	}, e.restartServer)
 
 	return server
 }
@@ -117,6 +123,19 @@ type editsOutput struct {
 // than about one position in it.
 type document struct {
 	File string `json:"file" jsonschema:"file path, absolute or relative to the project root"`
+}
+
+// languageServer names a whole language server, the subject of a tool that
+// acts on one rather than on a file or a position in a file.
+type languageServer struct {
+	Name string `json:"server" jsonschema:"the configured name of the language server"`
+}
+
+// restartOutput reports the state the named server reached, so an agent
+// reads that the replacement can answer rather than assuming it.
+type restartOutput struct {
+	Server string `json:"server"`
+	Status string `json:"status"`
 }
 
 type diagnostic struct {
@@ -228,6 +247,22 @@ func (e *editor) getDiagnostics(
 		return nil, diagnosticsOutput{}, err
 	}
 	return nil, toDiagnosticsOutput(diagnostics), nil
+}
+
+// restartServer replaces one language server's process. It returns only
+// once the replacement has passed its own readiness gate, so the next tool
+// call reaches a server that can answer rather than one still starting.
+func (e *editor) restartServer(
+	ctx context.Context, _ *mcp.CallToolRequest, in languageServer,
+) (*mcp.CallToolResult, restartOutput, error) {
+	if in.Name == "" {
+		return nil, restartOutput{}, fmt.Errorf("server must name a configured language server")
+	}
+
+	if err := e.manager.Restart(ctx, in.Name); err != nil {
+		return nil, restartOutput{}, err
+	}
+	return nil, restartOutput{Server: in.Name, Status: "ready"}, nil
 }
 
 // resolveTarget validates a 1-based position and finds which configured

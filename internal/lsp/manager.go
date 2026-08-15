@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -178,9 +179,12 @@ func NewManager(root string, entries []config.LanguageServer, opts ...Option) *M
 	}
 	for _, entry := range entries {
 		m.procs[entry.Name] = &serverProcess{
-			entry:    entry,
-			readyCh:  make(chan struct{}),
-			exitedCh: make(chan struct{}),
+			entry:      entry,
+			readyCh:    make(chan struct{}),
+			retiredCh:  make(chan struct{}),
+			exitedCh:   make(chan struct{}),
+			restartCh:  make(chan struct{}, 1),
+			stoppingCh: make(chan struct{}),
 		}
 	}
 	return m
@@ -191,37 +195,45 @@ func NewManager(root string, entries []config.LanguageServer, opts ...Option) *M
 // every subprocess has been launched, not once every server is ready — use
 // WaitReady for that. A server that exits unexpectedly is restarted; one
 // that exits too often is not — see WithRestartLimit.
+//
+// ctx is the lifetime of every process this Manager owns, the ones a
+// Restart spawns included: runServer is the only code that spawns, and it
+// runs from here until Shutdown. No single tool call's context can
+// therefore end a language server when that call returns.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, proc := range m.procs {
 		proc := proc
+		if !proc.beginSupervision() {
+			continue
+		}
 		go m.runServer(ctx, proc)
 	}
 	return nil
 }
 
-// runServer owns proc's process for its whole lifetime: spawn, handshake,
-// wait for exit, and either restart or give up, until Shutdown is called or
-// ctx is done. It is the only caller of proc.wait, so it is the only
-// goroutine that calls exec.Cmd.Wait for this process, which Go allows only
-// once per process.
+// runServer owns proc's process from Start until Shutdown or a done ctx:
+// spawn, handshake, wait for exit, and either restart or give up. A server
+// that spends its crash budget parks here waiting for a restart rather than
+// returning, so exactly one supervisor owns proc at every moment. It is the
+// only caller of proc.wait, so it is the only goroutine that calls
+// exec.Cmd.Wait for this process, which Go allows only once per process.
 func (m *Manager) runServer(ctx context.Context, proc *serverProcess) {
+	defer proc.endSupervision()
+
 	var exits []time.Time
 
-	for attempt := 0; ; attempt++ {
-		// NewManager already gave proc its first readyCh/exitedCh, so a
-		// WaitReady call that snapshots them before this goroutine is even
-		// scheduled still observes the pair this attempt actually uses.
-		// Only a restart (attempt > 0) needs a fresh pair.
-		if attempt > 0 {
-			proc.beginAttempt()
+	for {
+		generation, spawning := proc.beginAttempt()
+		if !spawning {
+			return
 		}
 
-		if err := proc.startProcess(ctx); err == nil {
+		if err := proc.startProcess(ctx, generation); err == nil {
 			if err := proc.handshake(ctx, m.root); err == nil {
-				go proc.negotiateReadiness(ctx, m.progressDebounce)
+				go proc.negotiateReadiness(ctx, m.progressDebounce, generation)
 			}
 			proc.wait()
 		}
@@ -235,13 +247,24 @@ func (m *Manager) runServer(ctx context.Context, proc *serverProcess) {
 		default:
 		}
 
-		exits = append(exits, time.Now())
-		exits = withinWindow(exits, m.restartWindow)
+		// A stop this Manager asked for is not a crash, so it leaves the
+		// budget holding exactly the crashes that came before it.
+		if proc.takeRestartRequest() {
+			continue
+		}
 
-		if len(exits) > m.restartLimit {
-			proc.markFailed()
+		exits = withinWindow(append(exits, time.Now()), m.restartWindow)
+		if len(exits) <= m.restartLimit {
+			continue
+		}
+
+		proc.markFailed(generation)
+		if !proc.awaitRestart(ctx) {
 			return
 		}
+		// A restart of a server that already gave up is a fresh start, so
+		// the crashes that spent the budget stop counting against it.
+		exits = nil
 	}
 }
 
@@ -257,12 +280,46 @@ func withinWindow(times []time.Time, window time.Duration) []time.Time {
 }
 
 // WaitReady blocks until the named server is ready, fails permanently, the
-// context is done, or timeout elapses, whichever comes first. A restart
-// between two attempts closes the old attempt's channel to wake WaitReady
-// rather than leaving it waiting on a channel no one will ever close again,
-// so WaitReady loops: each wake re-checks status and, if the server merely
-// moved on to a new attempt, waits on that attempt's channel instead.
+// context is done, or timeout elapses, whichever comes first.
 func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Duration) error {
+	// Every started server is on attempt 1 or later, so "after attempt 0"
+	// accepts whichever attempt the server happens to be on.
+	return m.waitReady(ctx, name, timeout, 0)
+}
+
+// Restart stops the named server and returns once its replacement has
+// passed its own readiness gate. A server that already spent its crash
+// budget takes a restart too: that is the state a restart is most needed
+// in. Waythrough cannot see that a server answers from a stale index, so
+// the caller is the only judge of when a restart is due.
+//
+// The replacement spawns on the lifetime context Start was given, never on
+// ctx. ctx bounds only the wait: how long the stop and the new readiness
+// gate may take before Restart gives up on them.
+func (m *Manager) Restart(ctx context.Context, name string) error {
+	proc, err := m.serverNamed(name)
+	if err != nil {
+		return err
+	}
+
+	// The attempt read here is the one this call retires. Everything below
+	// names it, so a restart can neither stop the replacement it asked for
+	// nor mistake the retired attempt's readiness for the new one's.
+	retired := proc.snapshot().generation
+	proc.requestRestart()
+	proc.stopAttempt(ctx, m.shutdownGrace, retired)
+	return m.waitReady(ctx, name, m.toolCallTimeout, retired)
+}
+
+// waitReady blocks until the named server is ready on an attempt later than
+// afterGeneration. It loops because a server can move between attempts
+// while a caller waits: each wake re-reads which attempt the server is on
+// and waits on that attempt's channels instead of on a channel this
+// generation has abandoned. The deadline bounds the loop, and each attempt
+// closes its channels exactly once, so no wake can repeat.
+func (m *Manager) waitReady(
+	ctx context.Context, name string, timeout time.Duration, afterGeneration int,
+) error {
 	proc, err := m.serverNamed(name)
 	if err != nil {
 		return err
@@ -271,12 +328,20 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 	deadline := time.Now().Add(timeout)
 
 	for {
-		ch, status := proc.snapshot()
-		switch status {
-		case StatusReady:
-			return nil
-		case StatusFailed:
-			return fmt.Errorf("language server %q failed to start", name)
+		state := proc.snapshot()
+
+		// Until a later attempt begins, this server's status still answers
+		// for the attempt the caller wants replaced, so the wait is for the
+		// next attempt to start rather than for this one to settle.
+		wake := state.retiredCh
+		if state.generation > afterGeneration {
+			switch state.status {
+			case StatusReady:
+				return nil
+			case StatusFailed:
+				return fmt.Errorf("language server %q failed to start", name)
+			}
+			wake = state.readyCh
 		}
 
 		remaining := time.Until(deadline)
@@ -286,8 +351,11 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 
 		timer := time.NewTimer(remaining)
 		select {
-		case <-ch:
+		case <-wake:
 			timer.Stop()
+		case <-proc.stoppingCh:
+			timer.Stop()
+			return fmt.Errorf("language server %q is shutting down", name)
 		case <-timer.C:
 			return fmt.Errorf("language server %q is still starting", name)
 		case <-ctx.Done():
@@ -303,8 +371,7 @@ func (m *Manager) Status(name string) (Status, error) {
 	if err != nil {
 		return 0, err
 	}
-	_, status := proc.snapshot()
-	return status, nil
+	return proc.snapshot().status, nil
 }
 
 // Definition asks the named server for the definition at a 1-based
@@ -436,6 +503,14 @@ func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProces
 	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
 		return nil, "", err
 	}
+
+	// A ready server has completed a handshake, so it holds a connection.
+	// Checking that here keeps a readiness signal that escaped its own
+	// attempt from being read as an invitation to talk to nothing.
+	if proc.currentServer() == nil {
+		return nil, "", fmt.Errorf("language server %q reported ready with no connection", name)
+	}
+
 	path := m.resolvePath(file)
 	if err := proc.syncFile(ctx, path); err != nil {
 		return nil, "", fmt.Errorf("sync %s: %w", path, err)
@@ -706,14 +781,29 @@ func locationFromProtocol(loc protocol.Location) Location {
 	}
 }
 
+// serverNamed finds the configured server called name. A name that matches
+// none of them comes back with the names that would have matched: a coding
+// agent picks a server by name, so the error it reads has to leave it able
+// to make the call work, rather than guess again.
 func (m *Manager) serverNamed(name string) (*serverProcess, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	proc, ok := m.procs[name]
-	if !ok {
-		return nil, fmt.Errorf("no configured language server named %q", name)
+	if ok {
+		return proc, nil
 	}
-	return proc, nil
+	if len(m.procs) == 0 {
+		return nil, fmt.Errorf("no language server named %q: none is configured", name)
+	}
+
+	configured := make([]string, 0, len(m.procs))
+	for configuredName := range m.procs {
+		configured = append(configured, configuredName)
+	}
+	sort.Strings(configured)
+	return nil, fmt.Errorf("no language server named %q; configured servers: %s",
+		name, strings.Join(configured, ", "))
 }
 
 // Shutdown sends `shutdown` and `exit` to every running server and waits
@@ -742,20 +832,47 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 // serverProcess is one managed language-server subprocess, across however
 // many spawn attempts it takes: its current OS process, its LSP session,
 // and its readiness state.
+//
+// restartCh and stoppingCh outlive every attempt and are never reassigned,
+// so any goroutine may read them without the lock. Every other field here
+// belongs to one attempt, and beginAttempt replaces it.
 type serverProcess struct {
-	entry config.LanguageServer
+	entry      config.LanguageServer
+	restartCh  chan struct{}
+	stoppingCh chan struct{}
 
-	mu           sync.Mutex
+	mu sync.Mutex
+	// generation counts the attempts this server has made. The process of a
+	// retired attempt can still speak while its replacement starts, so
+	// every readiness signal carries the generation that produced it and
+	// the signals from an older one are dropped.
+	generation   int
 	cmd          *exec.Cmd
 	server       protocol.Server
 	capabilities protocol.ServerCapabilities
 	status       Status
 	readyCh      chan struct{}
+	retiredCh    chan struct{}
 	exitedCh     chan struct{}
 	active       map[string]bool
 	everSawToken bool
 	shuttingDown bool
+	supervised   chan struct{}
 	openFiles    map[string]openFile
+}
+
+// attemptState is what a waiter needs to know about a server at one
+// instant: which attempt it is on, how that attempt is doing, and the two
+// channels that wake the waiter when either changes.
+type attemptState struct {
+	generation int
+	status     Status
+	// readyCh closes when this attempt reaches Ready or Failed, and when it
+	// is retired while still starting.
+	readyCh chan struct{}
+	// retiredCh closes when a later attempt begins, which is the only wake
+	// a caller gets when the attempt it is waiting past has already settled.
+	retiredCh chan struct{}
 }
 
 // openFile is what the server was last told about a document Waythrough
@@ -847,29 +964,120 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 	return nil
 }
 
-// beginAttempt resets per-attempt state at the start of every spawn,
-// including restarts, so a server that failed once can become ready again.
-// beginAttempt starts a new attempt generation. It closes the outgoing
-// readyCh (if the attempt it belonged to never reached Ready or Failed, as
-// happens when a server crashes before either) so any WaitReady call still
-// waiting on it wakes up and moves on to this attempt's channel, instead of
-// hanging on a channel this generation has abandoned.
-func (p *serverProcess) beginAttempt() {
+// beginSupervision reserves this server for one supervisor goroutine. It
+// reports false when a supervisor already owns it, so no two goroutines can
+// ever call exec.Cmd.Wait on the same process.
+func (p *serverProcess) beginSupervision() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.supervised != nil {
+		return false
+	}
+	p.supervised = make(chan struct{})
+	return true
+}
+
+// endSupervision reports that the supervisor goroutine has returned, which
+// is what a shutdown waits for before it calls this server stopped.
+func (p *serverProcess) endSupervision() {
+	p.mu.Lock()
+	supervised := p.supervised
+	p.mu.Unlock()
+
+	// runServer runs only once beginSupervision has reserved this server,
+	// so the channel a shutdown may be waiting on always exists here.
+	close(supervised)
+}
+
+// requestRestart asks the supervisor for a fresh attempt that does not
+// spend the crash budget. The channel holds one request: a second request
+// that arrives before the supervisor takes the first asks for the same
+// thing, so dropping it costs nothing.
+func (p *serverProcess) requestRestart() {
+	select {
+	case p.restartCh <- struct{}{}:
+	default:
+	}
+}
+
+// takeRestartRequest reports whether a restart was asked for, and consumes
+// the request when it was.
+func (p *serverProcess) takeRestartRequest() bool {
+	select {
+	case <-p.restartCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// awaitRestart parks the supervisor of a server that spent its crash
+// budget. It reports true when a restart was asked for, and false when the
+// server is shutting down or ctx ended, in which case the supervisor
+// returns and this server is over.
+func (p *serverProcess) awaitRestart(ctx context.Context) bool {
+	select {
+	case <-p.restartCh:
+		return true
+	case <-p.stoppingCh:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// beginAttempt starts a new attempt and clears the state the previous one
+// left behind, so a server that failed once can become ready again, and so
+// the replacement is told about a document from scratch rather than sent a
+// change on top of a version only the retired session ever held.
+//
+// It reports false once a shutdown has begun. That read and the decision to
+// spawn share this one lock hold, and shutdown sets the flag in the same
+// hold that reads the process to stop, so no attempt can slip between the
+// two and leave a subprocess nobody stops.
+//
+// It closes the outgoing readyCh, when the attempt it belonged to never
+// reached Ready or Failed, and always closes the outgoing retiredCh, so
+// every waiter wakes and moves on to this attempt rather than waiting on a
+// channel this server has abandoned.
+func (p *serverProcess) beginAttempt() (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.shuttingDown {
+		return 0, false
+	}
+
 	if p.status == StatusStarting {
 		close(p.readyCh)
 	}
+	close(p.retiredCh)
+
+	p.generation++
+	p.cmd = nil
 	p.readyCh = make(chan struct{})
+	p.retiredCh = make(chan struct{})
 	p.exitedCh = make(chan struct{})
 	p.active = nil
 	p.everSawToken = false
 	p.openFiles = nil
 	p.capabilities = protocol.ServerCapabilities{}
 	p.status = StatusStarting
+
+	return p.generation, true
 }
 
-func (p *serverProcess) startProcess(ctx context.Context) error {
+// startProcess spawns this attempt's process and publishes it as the
+// process this server currently owns. Until it does, p.cmd is nil, so a
+// spawn that fails cannot leave a caller waiting on the exit of a process
+// from an attempt that is already over.
+//
+// A shutdown that begins while the spawn is in flight looked for a process
+// this attempt had not published yet, so this attempt ends its own child
+// rather than let it outlive the manager. runServer skips proc.wait on an
+// error, which leaves the Wait below as the one Wait this process gets, and
+// Go allows exactly one.
+func (p *serverProcess) startProcess(ctx context.Context, generation int) error {
 	cmd := exec.CommandContext(ctx, p.entry.Command, p.entry.Args...)
 	cmd.Stderr = io.Discard
 
@@ -886,15 +1094,29 @@ func (p *serverProcess) startProcess(ctx context.Context) error {
 	}
 
 	stream := jsonrpc2.NewStream(pipeRWC{ReadCloser: stdout, WriteCloser: stdin})
-	_, _, server := protocol.NewClient(ctx, &client{proc: p}, stream)
+	_, _, server := protocol.NewClient(ctx, &client{proc: p, generation: generation}, stream)
 
 	p.mu.Lock()
-	p.cmd = cmd
-	p.server = server
+	stopping := p.shuttingDown
+	if !stopping {
+		p.cmd = cmd
+		p.server = server
+	}
 	p.mu.Unlock()
 
-	return nil
+	if !stopping {
+		return nil
+	}
+
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	return fmt.Errorf("start %s: %w", p.entry.Command, errShutdownBegan)
 }
+
+// errShutdownBegan reports a spawn abandoned because the manager is
+// stopping. It is not a fault of the language server, and no restart
+// follows it: the supervisor returns instead.
+var errShutdownBegan = errors.New("shutdown began before the language server could start")
 
 func (p *serverProcess) handshake(ctx context.Context, root string) error {
 	p.mu.Lock()
@@ -931,9 +1153,11 @@ func (p *serverProcess) handshake(ctx context.Context, root string) error {
 // debounce to learn whether the server opens a WorkDoneProgress token at
 // all; token open/close tracking in tokenCreated/tokenClosed handles
 // marking it ready once real progress reporting is seen.
-func (p *serverProcess) negotiateReadiness(ctx context.Context, debounce time.Duration) {
+func (p *serverProcess) negotiateReadiness(
+	ctx context.Context, debounce time.Duration, generation int,
+) {
 	if p.entry.Readiness == config.ReadinessHandshake {
-		p.markReady()
+		p.markReady(generation)
 		return
 	}
 
@@ -946,36 +1170,54 @@ func (p *serverProcess) negotiateReadiness(ctx context.Context, debounce time.Du
 		saw := p.everSawToken
 		p.mu.Unlock()
 		if !saw {
-			p.markReady()
+			p.markReady(generation)
 		}
 	case <-ctx.Done():
 	}
 }
 
-func (p *serverProcess) tokenCreated(key string) {
+func (p *serverProcess) tokenCreated(generation int, key string) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if generation != p.generation {
+		return
+	}
 	if p.active == nil {
 		p.active = make(map[string]bool)
 	}
 	p.active[key] = true
 	p.everSawToken = true
-	p.mu.Unlock()
 }
 
-func (p *serverProcess) tokenClosed(key string) {
+func (p *serverProcess) tokenClosed(generation int, key string) {
 	p.mu.Lock()
-	delete(p.active, key)
+	stale := generation != p.generation
+	if !stale {
+		delete(p.active, key)
+	}
 	empty := len(p.active) == 0
 	p.mu.Unlock()
 
+	if stale {
+		return
+	}
 	if empty {
-		p.markReady()
+		p.markReady(generation)
 	}
 }
 
-func (p *serverProcess) markReady() {
+// markReady, markFailed, tokenCreated and tokenClosed each take the attempt
+// that is speaking, and do nothing for an attempt this server has already
+// replaced. A graceful stop leaves the retired process able to speak while
+// its replacement starts, so without that check a signal from the process a
+// restart just ended could report the replacement ready before the
+// replacement had indexed anything.
+func (p *serverProcess) markReady(generation int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if generation != p.generation {
+		return
+	}
 	if p.status != StatusStarting {
 		return
 	}
@@ -983,9 +1225,12 @@ func (p *serverProcess) markReady() {
 	close(p.readyCh)
 }
 
-func (p *serverProcess) markFailed() {
+func (p *serverProcess) markFailed(generation int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if generation != p.generation {
+		return
+	}
 	if p.status == StatusFailed {
 		return
 	}
@@ -996,10 +1241,15 @@ func (p *serverProcess) markFailed() {
 	}
 }
 
-func (p *serverProcess) snapshot() (chan struct{}, Status) {
+func (p *serverProcess) snapshot() attemptState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.readyCh, p.status
+	return attemptState{
+		generation: p.generation,
+		status:     p.status,
+		readyCh:    p.readyCh,
+		retiredCh:  p.retiredCh,
+	}
 }
 
 // wait blocks until the current process attempt exits. Only runServer's
@@ -1022,16 +1272,57 @@ func (p *serverProcess) shutdownRequested() bool {
 	return p.shuttingDown
 }
 
+// shutdown ends this server for good: no later attempt may spawn, the
+// attempt running now is stopped, and shutdown returns only once the
+// supervisor goroutine has returned. That last wait is what makes the
+// promise whole, since a spawn already in flight ends its own child and the
+// supervisor returns after it.
 func (p *serverProcess) shutdown(ctx context.Context, killGrace time.Duration) {
 	p.mu.Lock()
+	firstCall := !p.shuttingDown
 	p.shuttingDown = true
+	generation := p.generation
+	supervised := p.supervised
+	if firstCall {
+		close(p.stoppingCh)
+	}
+	p.mu.Unlock()
+
+	p.stopAttempt(ctx, killGrace, generation)
+
+	if supervised == nil {
+		return
+	}
+	<-supervised
+}
+
+// stopAttempt ends the process of one attempt: `shutdown` and `exit` first,
+// then a kill once killGrace has elapsed. It does nothing for an attempt
+// this server has already replaced, so a restart cannot stop the very
+// replacement it asked for, and nothing for an attempt that never spawned a
+// process, so a failed spawn cannot leave this waiting on an exit that will
+// never come.
+func (p *serverProcess) stopAttempt(
+	ctx context.Context, killGrace time.Duration, generation int,
+) {
+	p.mu.Lock()
+	current := p.generation
 	cmd := p.cmd
 	server := p.server
 	exited := p.exitedCh
 	p.mu.Unlock()
 
+	if generation != current {
+		return
+	}
 	if cmd == nil {
 		return
+	}
+
+	select {
+	case <-exited:
+		return
+	default:
 	}
 
 	if server != nil {
@@ -1041,11 +1332,13 @@ func (p *serverProcess) shutdown(ctx context.Context, killGrace time.Duration) {
 
 	select {
 	case <-exited:
-		return
 	case <-time.After(killGrace):
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
+		// The kill closes the process's pipes, so whatever request the
+		// supervisor still has in flight fails and it reaches proc.wait,
+		// which is the one writer that closes this channel.
 		<-exited
 	}
 }

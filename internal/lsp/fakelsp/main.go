@@ -54,6 +54,7 @@ var (
 	diagnostics      = flag.String("diagnostics", "", "raw JSON result to answer textDocument/diagnostic with, in the same spirit as -signature-help; empty means a full report holding no diagnostics, which is what a clean file gets")
 	requestLog       = flag.String("request-log", "", "path to a file that receives the method name of every request and notification handled, one per line — lets a test assert Waythrough never sent a request at all, not merely that it disliked the answer")
 	syncLog          = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
+	instanceLog      = flag.String("instance-log", "", "path to a file that receives this process's pid on every process start, one per line — lets a restart test read that the old process ended and that a different one now serves, which no LSP message reports")
 
 	openDocs       = map[string]bool{}
 	syncLogFile    *os.File
@@ -63,6 +64,10 @@ var (
 
 func main() {
 	flag.Parse()
+
+	// The pid is recorded before any flag can end this run, so the log
+	// counts every process start, including the ones that crash on purpose.
+	logInstance()
 
 	if *crash {
 		os.Exit(1)
@@ -169,6 +174,19 @@ func openLog(name, path string) *os.File {
 		os.Exit(1)
 	}
 	return f
+}
+
+// logInstance appends this process's pid to -instance-log, if set. It opens
+// and closes the file rather than holding it, because every instance of this
+// fake appends to the same path, and a restart test reads that file while a
+// later instance still runs.
+func logInstance() {
+	if *instanceLog == "" {
+		return
+	}
+	f := openLog("instance-log", *instanceLog)
+	defer func() { _ = f.Close() }()
+	_, _ = fmt.Fprintln(f, os.Getpid())
 }
 
 // logRequest appends one method name to -request-log, if set, for every

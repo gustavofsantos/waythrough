@@ -15,6 +15,11 @@ type client struct {
 	protocol.UnimplementedClient
 
 	proc *serverProcess
+	// generation is the attempt this connection was opened for. The process
+	// of a retired attempt can still speak while its replacement starts, so
+	// every readiness signal carries the attempt that produced it and
+	// serverProcess drops the ones that no longer apply.
+	generation int
 }
 
 // WorkDoneProgressCreate accepts a server's request to report progress on a
@@ -25,7 +30,7 @@ func (c *client) WorkDoneProgressCreate(
 	ctx context.Context,
 	params *protocol.WorkDoneProgressCreateParams,
 ) error {
-	c.proc.tokenCreated(tokenKey(params.Token))
+	c.proc.tokenCreated(c.generation, tokenKey(params.Token))
 	return nil
 }
 
@@ -40,7 +45,7 @@ func (c *client) Progress(ctx context.Context, params *protocol.ProgressParams) 
 		return nil
 	}
 	if value.Kind == "end" {
-		c.proc.tokenClosed(tokenKey(params.Token))
+		c.proc.tokenClosed(c.generation, tokenKey(params.Token))
 	}
 	return nil
 }
