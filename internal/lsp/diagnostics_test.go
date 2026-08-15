@@ -5,34 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
 )
 
 // diagnosticsManager starts a manager whose "fake" server runs with args,
 // and returns it with the path of the file every spec below asks about.
 func diagnosticsManager(ctx context.Context, args ...string) (*lsp.Manager, string) {
-	root := GinkgoT().TempDir()
-	file := filepath.Join(root, "main.fake")
-	Expect(os.WriteFile(file, []byte("greet()"), 0o644)).To(Succeed())
-
-	entry := config.LanguageServer{
-		Name:      "fake",
-		Command:   fakelspPath,
-		Args:      args,
-		Readiness: config.ReadinessHandshake,
-		Filetypes: map[string]string{".fake": "fake"},
-	}
-
-	manager := lsp.NewManager(root, []config.LanguageServer{entry})
-	Expect(manager.Start(ctx)).To(Succeed())
-	Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
-	return manager, file
+	return fakeManager(ctx, "greet()", args...)
 }
 
 func readRequestLog(path string) []string {

@@ -218,11 +218,9 @@ func (e *editor) signatureHelp(
 func (e *editor) getDiagnostics(
 	ctx context.Context, _ *mcp.CallToolRequest, in document,
 ) (*mcp.CallToolResult, diagnosticsOutput, error) {
-	ext := filepath.Ext(in.File)
-	name, ok := e.serverForExt[ext]
-	if !ok {
-		return nil, diagnosticsOutput{},
-			fmt.Errorf("no configured language server for file extension %q", ext)
+	name, err := e.serverForFile(in.File)
+	if err != nil {
+		return nil, diagnosticsOutput{}, err
 	}
 
 	diagnostics, err := e.manager.Diagnostics(ctx, name, in.File)
@@ -233,16 +231,22 @@ func (e *editor) getDiagnostics(
 }
 
 // resolveTarget validates a 1-based position and finds which configured
-// server handles in.File's extension — the checks every editor operation
-// needs before it can ask a language server anything.
+// server handles in.File's extension — the checks every editor operation on
+// a position needs before it can ask a language server anything.
 func (e *editor) resolveTarget(in position) (string, error) {
 	if in.Line < 1 || in.Column < 1 {
 		return "", fmt.Errorf(
 			"line and column are 1-based and must be at least 1, got line=%d column=%d",
 			in.Line, in.Column)
 	}
+	return e.serverForFile(in.File)
+}
 
-	ext := filepath.Ext(in.File)
+// serverForFile finds which configured server handles file's extension. It
+// is the whole check for a tool that asks about a file rather than about a
+// position in it, since such a tool has no line or column to validate.
+func (e *editor) serverForFile(file string) (string, error) {
+	ext := filepath.Ext(file)
 	name, ok := e.serverForExt[ext]
 	if !ok {
 		return "", fmt.Errorf("no configured language server for file extension %q", ext)

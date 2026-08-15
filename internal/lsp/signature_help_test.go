@@ -2,14 +2,10 @@ package lsp_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
 )
 
@@ -17,22 +13,7 @@ import (
 // textDocument/signatureHelp with the canned result, and returns it with the
 // path of the file every spec below asks about.
 func signatureHelpManager(ctx context.Context, result string) (*lsp.Manager, string) {
-	root := GinkgoT().TempDir()
-	file := filepath.Join(root, "main.fake")
-	Expect(os.WriteFile(file, []byte(`greet("world", "hi")`), 0o644)).To(Succeed())
-
-	entry := config.LanguageServer{
-		Name:      "fake",
-		Command:   fakelspPath,
-		Args:      []string{"-signature-help=" + result},
-		Readiness: config.ReadinessHandshake,
-		Filetypes: map[string]string{".fake": "fake"},
-	}
-
-	manager := lsp.NewManager(root, []config.LanguageServer{entry})
-	Expect(manager.Start(ctx)).To(Succeed())
-	Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
-	return manager, file
+	return fakeManager(ctx, `greet("world", "hi")`, "-signature-help="+result)
 }
 
 var _ = Describe("Manager.SignatureHelp", func() {

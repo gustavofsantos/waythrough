@@ -24,6 +24,29 @@ type syncEvent struct {
 	Text    string `json:"text"`
 }
 
+// fakeManager starts a manager whose one "fake" server runs with args, and
+// returns it with the path of a main.fake file holding content. It is the
+// fixture every spec that asks the fake a question needs, and it returns
+// only once the server is ready to be asked.
+func fakeManager(ctx context.Context, content string, args ...string) (*lsp.Manager, string) {
+	root := GinkgoT().TempDir()
+	file := filepath.Join(root, "main.fake")
+	Expect(os.WriteFile(file, []byte(content), 0o644)).To(Succeed())
+
+	entry := config.LanguageServer{
+		Name:      "fake",
+		Command:   fakelspPath,
+		Args:      args,
+		Readiness: config.ReadinessHandshake,
+		Filetypes: map[string]string{".fake": "fake"},
+	}
+
+	manager := lsp.NewManager(root, []config.LanguageServer{entry})
+	Expect(manager.Start(ctx)).To(Succeed())
+	Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
+	return manager, file
+}
+
 func readSyncLog(path string) []syncEvent {
 	data, err := os.ReadFile(path)
 	Expect(err).NotTo(HaveOccurred())
@@ -245,22 +268,8 @@ var _ = Describe("Manager", func() {
 		)
 
 		BeforeEach(func() {
-			root := GinkgoT().TempDir()
-			file = filepath.Join(root, "main.fake")
-			Expect(os.WriteFile(file, []byte("hello world"), 0o644)).To(Succeed())
-
 			syncLog = filepath.Join(GinkgoT().TempDir(), "sync.log")
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-sync-log=" + syncLog},
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-
-			manager = lsp.NewManager(root, []config.LanguageServer{entry})
-			Expect(manager.Start(ctx)).To(Succeed())
-			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
+			manager, file = fakeManager(ctx, "hello world", "-sync-log="+syncLog)
 		})
 
 		It("sends the file's actual content via didOpen, at version 1, on the first sync", func() {
