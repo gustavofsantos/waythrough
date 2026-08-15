@@ -40,9 +40,8 @@ brews:
     description: MCP server that connects coding agents to LSP servers
     repository:
       owner: gustavofsantos
-      name: homebrew-tap
+      name: waythrough
       branch: main
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     commit_author:
       name: goreleaser-bot
       email: actions@github.com
