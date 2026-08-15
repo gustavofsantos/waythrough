@@ -479,8 +479,8 @@ func (m *Manager) Diagnostics(ctx context.Context, name, file string) ([]Diagnos
 	if err != nil {
 		return nil, err
 	}
-	if !proc.supportsPullDiagnostics() {
-		return nil, fmt.Errorf("language server %q does not support pull diagnostics", name)
+	if err := proc.requirePullDiagnostics(name); err != nil {
+		return nil, err
 	}
 
 	result, err := proc.currentServer().Diagnostic(ctx, &protocol.DocumentDiagnosticParams{
@@ -889,12 +889,25 @@ func (p *serverProcess) currentServer() protocol.Server {
 	return p.server
 }
 
-// supportsPullDiagnostics reports whether this server advertised, at its
-// handshake, that a client may ask it for a file's diagnostics.
-func (p *serverProcess) supportsPullDiagnostics() bool {
+// requirePullDiagnostics reports why this server cannot be asked for a
+// file's diagnostics, and nothing when it can.
+//
+// It reads the status in the same lock hold as the capability, because a
+// restart clears what the retired attempt advertised: a server between two
+// attempts has said nothing yet about what it supports. Reading that
+// silence as a refusal would tell a coding agent this server can never
+// answer for diagnostics, and an agent told that stops asking.
+func (p *serverProcess) requirePullDiagnostics(name string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.capabilities.DiagnosticProvider != nil
+
+	if p.status != StatusReady {
+		return fmt.Errorf("language server %q restarted while this call was in flight", name)
+	}
+	if p.capabilities.DiagnosticProvider == nil {
+		return fmt.Errorf("language server %q does not support pull diagnostics", name)
+	}
+	return nil
 }
 
 // syncFile tells the language server about path's current on-disk content:

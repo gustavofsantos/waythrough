@@ -9,6 +9,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.lsp.dev/protocol"
 
 	"github.com/gustavofsantos/waythrough/internal/config"
 )
@@ -111,6 +112,35 @@ var _ = Describe("an attempt that races the shutdown of its server", func() {
 		Consistently(markerExists).WithArguments(marker).
 			WithTimeout(3*survivalMarker).Should(BeFalse(),
 			"the spawn no one could see must have ended the process it started")
+	})
+})
+
+var _ = Describe("a request that reaches a server between two of its attempts", func() {
+	It("blames the restart, rather than a capability the server never withdrew", func() {
+		proc := newAttemptTracker(config.ReadinessHandshake)
+
+		generation, spawning := proc.beginAttempt()
+		Expect(spawning).To(BeTrue())
+
+		proc.mu.Lock()
+		proc.capabilities = protocol.ServerCapabilities{
+			DiagnosticProvider: &protocol.DiagnosticOptions{},
+		}
+		proc.mu.Unlock()
+		proc.markReady(generation)
+
+		Expect(proc.requirePullDiagnostics("fake")).To(Succeed())
+
+		// A restart clears what the retired attempt advertised, and the
+		// replacement has not spoken yet.
+		_, spawning = proc.beginAttempt()
+		Expect(spawning).To(BeTrue())
+
+		err := proc.requirePullDiagnostics("fake")
+		Expect(err).To(MatchError(ContainSubstring("restart")))
+		Expect(err).NotTo(MatchError(ContainSubstring("does not support")),
+			"a server that has not spoken has not said it cannot do this, "+
+				"and an agent told otherwise would stop asking for good")
 	})
 })
 
