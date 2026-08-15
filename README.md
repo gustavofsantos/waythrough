@@ -14,7 +14,7 @@ Antigravity are coding agents. Waythrough gives the agent the same
 
 ## Status
 
-This project is in early setup. It has five MCP tools. Tests run
+This project is in early setup. It has six MCP tools. Tests run
 them against a test language server, not against a real one yet.
 
 ## Install
@@ -86,6 +86,12 @@ Waythrough exposes these MCP tools to a connected coding agent:
   rather than reporting a clean file. `gopls` pushes its diagnostics
   by default and advertises no pull support, so it fails this call
   today.
+- `restart_server` — restart one language server by name. The call
+  returns only when the replacement can answer, so the next call
+  does not reach a server that is still starting. Every other
+  language server keeps running. Use it when a server's answers no
+  longer match the code on disk. Waythrough cannot see that a
+  server answers from a stale index, so your agent must decide.
 
 ## Learn more
 

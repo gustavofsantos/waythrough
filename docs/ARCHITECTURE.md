@@ -32,12 +32,15 @@ tools and check a change.
    for each one to become ready.
 4. `internal/cli` builds the MCP server from `internal/editor`. This
    step registers the `get_definition`, `list_references`,
-   `rename_symbol`, `signature_help`, and `get_diagnostics` tools.
+   `rename_symbol`, `signature_help`, `get_diagnostics`, and
+   `restart_server` tools.
 5. The MCP server serves tool calls until the agent's session ends.
    `internal/editor` routes each call, by the file extension in the
    call, to the language server that handles it. It sends the LSP
    request through the `internal/lsp` manager, and it turns the LSP
-   response into the tool's output shape.
+   response into the tool's output shape. `restart_server` is the
+   one tool that names its language server instead, because it acts
+   on a whole server rather than on a file.
 6. When `serve` exits, it shuts down every language server the
    manager started.
 
@@ -52,6 +55,32 @@ per server in `waythrough.yaml`:
 - `handshake` — an opt-in for a server with no background indexing.
   The manager treats the server as ready as soon as the
   initialize and initialized handshake completes.
+
+A restart passes the same gate. The manager stops the old process,
+starts a new one, and reports ready only when that new process
+passes the gate itself.
+
+Each start of a process is one attempt, and the manager numbers
+them. A stopped process can still send messages while its
+replacement starts, so every readiness signal carries the attempt
+that produced it. The manager drops a signal from an attempt it has
+already replaced. Without this, a message from the stopped process
+would report the replacement ready before that server had indexed
+anything.
+
+## Server lifecycle
+
+One goroutine owns each language server, from `Start` to shutdown.
+It starts the process, runs the handshake, and waits for the
+process to exit. Then it starts another process, unless the server
+has exited more often than the restart limit allows. A server in
+that state waits for a restart. It does not release its goroutine,
+so exactly one goroutine owns each server at all times.
+
+This has two results. Every process starts on the context `Start`
+received, so no single tool call can end a language server when
+that call returns. And a restart of a server that gave up needs no
+new goroutine.
 
 ## Add a language server
 
