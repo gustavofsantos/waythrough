@@ -30,6 +30,10 @@ func New(manager *lsp.Manager, cfg config.Config) *mcp.Server {
 		Name:        "list_references",
 		Description: "List every place the symbol at a file position is used.",
 	}, e.listReferences)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "rename_symbol",
+		Description: "Compute the edits that rename the symbol at a file position, across every file it touches. Does not write the edits to disk — apply them yourself. Columns are a byte-offset approximation and may be off on lines with non-ASCII characters before the edit.",
+	}, e.renameSymbol)
 
 	return server
 }
@@ -65,6 +69,29 @@ type locationsOutput struct {
 	Locations []location `json:"locations"`
 }
 
+type renamePosition struct {
+	File    string `json:"file" jsonschema:"path to the file, absolute or relative to the project root"`
+	Line    int    `json:"line" jsonschema:"1-based line number"`
+	Column  int    `json:"column" jsonschema:"1-based column number"`
+	NewName string `json:"new_name" jsonschema:"the new name to give the symbol"`
+}
+
+// edit is a range replacement an agent applies verbatim, so its columns —
+// unlike location's — are not merely a navigation hint: an off-by-N on a
+// line with non-ASCII characters before the edit corrupts the file.
+type edit struct {
+	File        string `json:"file"`
+	StartLine   int    `json:"start_line"`
+	StartColumn int    `json:"start_column"`
+	EndLine     int    `json:"end_line"`
+	EndColumn   int    `json:"end_column"`
+	NewText     string `json:"new_text"`
+}
+
+type editsOutput struct {
+	Edits []edit `json:"edits"`
+}
+
 func (e *editor) getDefinition(ctx context.Context, _ *mcp.CallToolRequest, in position) (*mcp.CallToolResult, locationsOutput, error) {
 	name, err := e.resolveTarget(in)
 	if err != nil {
@@ -91,6 +118,23 @@ func (e *editor) listReferences(ctx context.Context, _ *mcp.CallToolRequest, in 
 	return nil, toLocationsOutput(locations), nil
 }
 
+func (e *editor) renameSymbol(ctx context.Context, _ *mcp.CallToolRequest, in renamePosition) (*mcp.CallToolResult, editsOutput, error) {
+	if in.NewName == "" {
+		return nil, editsOutput{}, fmt.Errorf("new_name must not be empty")
+	}
+
+	name, err := e.resolveTarget(position{File: in.File, Line: in.Line, Column: in.Column})
+	if err != nil {
+		return nil, editsOutput{}, err
+	}
+
+	edits, err := e.manager.Rename(ctx, name, in.File, in.Line, in.Column, in.NewName)
+	if err != nil {
+		return nil, editsOutput{}, err
+	}
+	return nil, toEditsOutput(edits), nil
+}
+
 // resolveTarget validates a 1-based position and finds which configured
 // server handles in.File's extension — the checks every editor operation
 // needs before it can ask a language server anything.
@@ -111,6 +155,21 @@ func toLocationsOutput(locations []lsp.Location) locationsOutput {
 	out := locationsOutput{Locations: make([]location, len(locations))}
 	for i, loc := range locations {
 		out.Locations[i] = location{File: loc.File, Line: loc.Line, Column: loc.Column}
+	}
+	return out
+}
+
+func toEditsOutput(edits []lsp.Edit) editsOutput {
+	out := editsOutput{Edits: make([]edit, len(edits))}
+	for i, e := range edits {
+		out.Edits[i] = edit{
+			File:        e.File,
+			StartLine:   e.StartLine,
+			StartColumn: e.StartColumn,
+			EndLine:     e.EndLine,
+			EndColumn:   e.EndColumn,
+			NewText:     e.NewText,
+		}
 	}
 	return out
 }

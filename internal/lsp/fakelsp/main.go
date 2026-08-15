@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.lsp.dev/uri"
 )
 
 type message struct {
@@ -40,6 +42,13 @@ var (
 	referencesLine   = flag.Int("references-line", -1, "0-based line of the first canned textDocument/references location; negative means no references")
 	referencesColumn = flag.Int("references-column", 0, "0-based character of every canned textDocument/references location")
 	referencesCount  = flag.Int("references-count", 1, "how many canned locations to answer textDocument/references with, at consecutive lines from -references-line")
+	renameLine       = flag.Int("rename-line", -1, "0-based line of the canned textDocument/rename edit in the requested document; negative means no rename")
+	renameColumn     = flag.Int("rename-column", 0, "0-based character where the canned edit in the requested document starts")
+	renameLength     = flag.Int("rename-length", 0, "number of characters the canned edit in the requested document replaces")
+	renameOtherFile  = flag.String("rename-other-file", "", "path to a second file to include a canned edit for, proving a rename can span files; empty means one edit only")
+	renameOtherLine  = flag.Int("rename-other-line", 0, "0-based line of the canned edit in -rename-other-file")
+	renameOtherCol   = flag.Int("rename-other-column", 0, "0-based character where the canned edit in -rename-other-file starts")
+	renameOtherLen   = flag.Int("rename-other-length", 0, "number of characters the canned edit in -rename-other-file replaces")
 
 	openDocs = map[string]bool{}
 )
@@ -86,6 +95,8 @@ func main() {
 			handleDefinition(msg)
 		case "textDocument/references":
 			handleReferences(msg)
+		case "textDocument/rename":
+			handleRename(msg)
 		}
 	}
 }
@@ -168,6 +179,56 @@ func handleReferences(msg message) {
 		)
 	}
 	respond(msg.ID, "["+strings.Join(locations, ",")+"]")
+}
+
+// handleRename answers textDocument/rename. Like handleDefinition, it errors
+// if the requested document was never opened, and otherwise returns a
+// WorkspaceEdit built from the -rename-* flags: one edit at the requested
+// document's canned position, plus a second edit in -rename-other-file when
+// set, proving a rename can span files. Every edit's newText is the
+// request's own newName, echoed back the way a real rename would substitute
+// it at each location. -rename-line negative means the server declines to
+// rename (null result).
+func handleRename(msg message) {
+	docURI := documentURI(msg.Params)
+	if !openDocs[docURI] {
+		respondError(msg.ID, -32000, fmt.Sprintf("document not open: %s", docURI))
+		return
+	}
+	if *renameLine < 0 {
+		respond(msg.ID, "null")
+		return
+	}
+
+	var params struct {
+		NewName string `json:"newName"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		respondError(msg.ID, -32602, fmt.Sprintf("invalid params: %s", err))
+		return
+	}
+
+	changes := map[string][]string{
+		docURI: {canonEdit(*renameLine, *renameColumn, *renameLength, params.NewName)},
+	}
+	if *renameOtherFile != "" {
+		otherURI := string(uri.File(*renameOtherFile))
+		changes[otherURI] = append(changes[otherURI], canonEdit(*renameOtherLine, *renameOtherCol, *renameOtherLen, params.NewName))
+	}
+
+	entries := make([]string, 0, len(changes))
+	for fileURI, edits := range changes {
+		entries = append(entries, fmt.Sprintf("%q:[%s]", fileURI, strings.Join(edits, ",")))
+	}
+	respond(msg.ID, fmt.Sprintf(`{"changes":{%s}}`, strings.Join(entries, ",")))
+}
+
+func canonEdit(line, column, length int, newText string) string {
+	newTextJSON, _ := json.Marshal(newText)
+	return fmt.Sprintf(
+		`{"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}},"newText":%s}`,
+		line, column, line, column+length, newTextJSON,
+	)
 }
 
 // workDoneProgressAdvertised reports whether the client's initialize params

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -68,6 +69,18 @@ type Location struct {
 	File   string
 	Line   int
 	Column int
+}
+
+// Edit is a range replacement in a file, 1-based to match Location. Unlike
+// Location it names both ends of the range a rename must replace, since a
+// single point cannot say how much text to remove.
+type Edit struct {
+	File        string
+	StartLine   int
+	StartColumn int
+	EndLine     int
+	EndColumn   int
+	NewText     string
 }
 
 // Option configures a Manager.
@@ -292,6 +305,27 @@ func (m *Manager) References(ctx context.Context, name, file string, line, colum
 	return locations, nil
 }
 
+// Rename asks the named server for the workspace edit that renames the
+// symbol at a 1-based line/column in file to newName, waiting for the
+// server to be ready first and syncing the file's current on-disk content
+// to it before asking. file may be relative to Manager's root or absolute.
+// Rename does not write the edit to disk; the caller applies it.
+func (m *Manager) Rename(ctx context.Context, name, file string, line, column int, newName string) ([]Edit, error) {
+	proc, path, err := m.prepare(ctx, name, file)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := proc.currentServer().Rename(ctx, &protocol.RenameParams{
+		TextDocumentPositionParams: textDocumentPosition(path, line, column),
+		NewName:                    newName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("rename: %w", err)
+	}
+	return editsFromWorkspaceEdit(result)
+}
+
 // prepare resolves file, waits for name's server to be ready, and syncs
 // file's current on-disk content to it — the setup every LSP position
 // request needs before it can ask the server anything.
@@ -342,6 +376,53 @@ func locationsFromDefinitionResult(requestedPath string, result protocol.Definit
 	default:
 		return nil, fmt.Errorf("definition for %s: unsupported result shape %T (linkSupport was not advertised)", requestedPath, result)
 	}
+}
+
+// editsFromWorkspaceEdit converts a rename result into Edits, sorted by
+// file then position so callers see a deterministic order regardless of
+// Go's randomized map iteration over WorkspaceEdit.Changes. It handles only
+// Changes: handshake() advertises no workspace.workspaceEdit capabilities,
+// so a spec-compliant server must answer with Changes, not DocumentChanges.
+func editsFromWorkspaceEdit(result *protocol.WorkspaceEdit) ([]Edit, error) {
+	if result == nil {
+		return nil, nil
+	}
+	if len(result.DocumentChanges) > 0 {
+		return nil, fmt.Errorf("rename: unsupported result shape: documentChanges (workspace.workspaceEdit.documentChanges was not advertised)")
+	}
+
+	var edits []Edit
+	for docURI, textEdits := range result.Changes {
+		path := filePathFromURI(docURI)
+		for _, te := range textEdits {
+			edits = append(edits, Edit{
+				File:        path,
+				StartLine:   int(te.Range.Start.Line) + 1,
+				StartColumn: int(te.Range.Start.Character) + 1,
+				EndLine:     int(te.Range.End.Line) + 1,
+				EndColumn:   int(te.Range.End.Character) + 1,
+				NewText:     te.NewText,
+			})
+		}
+	}
+	sort.Slice(edits, func(i, j int) bool {
+		if edits[i].File != edits[j].File {
+			return edits[i].File < edits[j].File
+		}
+		if edits[i].StartLine != edits[j].StartLine {
+			return edits[i].StartLine < edits[j].StartLine
+		}
+		return edits[i].StartColumn < edits[j].StartColumn
+	})
+	return edits, nil
+}
+
+func filePathFromURI(docURI uri.URI) string {
+	platform := uri.PlatformPOSIX
+	if runtime.GOOS == "windows" {
+		platform = uri.PlatformWindows
+	}
+	return uri.FsPathFor(docURI, platform, false)
 }
 
 func locationFromProtocol(loc protocol.Location) Location {
