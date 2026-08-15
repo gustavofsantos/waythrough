@@ -37,6 +37,12 @@ func New(manager *lsp.Manager, cfg config.Config) *mcp.Server {
 			"apply them yourself. Columns are a byte-offset approximation and may " +
 			"be off on lines with non-ASCII characters before the edit.",
 	}, e.renameSymbol)
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "signature_help",
+		Description: "List the signatures the call at a file position could match, " +
+			"and say which signature and which parameter that position is on. " +
+			"Use it inside a call to learn what the next argument must be.",
+	}, e.signatureHelp)
 
 	return server
 }
@@ -101,6 +107,23 @@ type editsOutput struct {
 	Edits []edit `json:"edits"`
 }
 
+type signature struct {
+	Label         string   `json:"label"`
+	Documentation string   `json:"documentation,omitempty"`
+	Parameters    []string `json:"parameters"`
+}
+
+// signatureHelpOutput names its two indices as indices, not as positions:
+// each one counts from 0, unlike the 1-based line and column every other
+// tool here speaks in. ActiveSignature indexes Signatures, ActiveParameter
+// indexes that signature's Parameters, and neither means anything when
+// Signatures is empty.
+type signatureHelpOutput struct {
+	Signatures      []signature `json:"signatures"`
+	ActiveSignature int         `json:"active_signature" jsonschema:"0-based signature index"`
+	ActiveParameter int         `json:"active_parameter" jsonschema:"0-based parameter index"`
+}
+
 func (e *editor) getDefinition(
 	ctx context.Context, _ *mcp.CallToolRequest, in position,
 ) (*mcp.CallToolResult, locationsOutput, error) {
@@ -150,6 +173,21 @@ func (e *editor) renameSymbol(
 	return nil, toEditsOutput(edits), nil
 }
 
+func (e *editor) signatureHelp(
+	ctx context.Context, _ *mcp.CallToolRequest, in position,
+) (*mcp.CallToolResult, signatureHelpOutput, error) {
+	name, err := e.resolveTarget(in)
+	if err != nil {
+		return nil, signatureHelpOutput{}, err
+	}
+
+	help, err := e.manager.SignatureHelp(ctx, name, in.File, in.Line, in.Column)
+	if err != nil {
+		return nil, signatureHelpOutput{}, err
+	}
+	return nil, toSignatureHelpOutput(help), nil
+}
+
 // resolveTarget validates a 1-based position and finds which configured
 // server handles in.File's extension — the checks every editor operation
 // needs before it can ask a language server anything.
@@ -172,6 +210,22 @@ func toLocationsOutput(locations []lsp.Location) locationsOutput {
 	out := locationsOutput{Locations: make([]location, len(locations))}
 	for i, loc := range locations {
 		out.Locations[i] = location{File: loc.File, Line: loc.Line, Column: loc.Column}
+	}
+	return out
+}
+
+func toSignatureHelpOutput(help lsp.SignatureHelp) signatureHelpOutput {
+	out := signatureHelpOutput{
+		Signatures:      make([]signature, len(help.Signatures)),
+		ActiveSignature: help.ActiveSignature,
+		ActiveParameter: help.ActiveParameter,
+	}
+	for i, s := range help.Signatures {
+		out.Signatures[i] = signature{
+			Label:         s.Label,
+			Documentation: s.Documentation,
+			Parameters:    s.Parameters,
+		}
 	}
 	return out
 }

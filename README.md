@@ -14,7 +14,7 @@ Antigravity are coding agents. Waythrough gives the agent the same
 
 ## Status
 
-This project is in early setup. It has three MCP tools. Tests run
+This project is in early setup. It has four MCP tools. Tests run
 them against a test language server, not against a real one yet.
 
 ## Install
@@ -77,6 +77,9 @@ Waythrough exposes these MCP tools to a connected coding agent:
 - `rename_symbol` — build the list of edits that rename a symbol,
   across every file it touches. It does not write the edits to disk.
   Your agent applies them.
+- `signature_help` — list the signatures a call could match, given a
+  file position inside that call. It also says which signature and
+  which parameter the position is on.
 
 ## Learn more
 

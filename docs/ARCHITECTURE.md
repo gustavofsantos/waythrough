@@ -31,8 +31,8 @@ tools and check a change.
    starts one subprocess per configured language server, and waits
    for each one to become ready.
 4. `internal/cli` builds the MCP server from `internal/editor`. This
-   step registers the `get_definition`, `list_references`, and
-   `rename_symbol` tools.
+   step registers the `get_definition`, `list_references`,
+   `rename_symbol`, and `signature_help` tools.
 5. The MCP server serves tool calls until the agent's session ends.
    `internal/editor` routes each call, by the file extension in the
    call, to the language server that handles it. It sends the LSP

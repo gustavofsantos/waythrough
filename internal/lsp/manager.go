@@ -84,6 +84,28 @@ type Edit struct {
 	NewText     string
 }
 
+// Signature is one callable form a symbol takes at a call site: the form
+// itself, its doc comment, and the label of each parameter it accepts.
+type Signature struct {
+	Label         string
+	Documentation string
+	Parameters    []string
+}
+
+// SignatureHelp is what a language server knows about the call the cursor
+// sits inside: every signature the call could match, and which one, and
+// which of its parameters, the cursor is on.
+//
+// ActiveSignature indexes Signatures, and ActiveParameter indexes that
+// signature's Parameters. Both are 0-based, unlike Location's line and
+// column, because both are list indices rather than file positions. Neither
+// means anything when Signatures is empty.
+type SignatureHelp struct {
+	Signatures      []Signature
+	ActiveSignature int
+	ActiveParameter int
+}
+
 // Option configures a Manager.
 type Option func(*Manager)
 
@@ -338,6 +360,27 @@ func (m *Manager) Rename(
 	return editsFromWorkspaceEdit(result)
 }
 
+// SignatureHelp asks the named server which signatures the call at a 1-based
+// line/column in file could match, waiting for the server to be ready first
+// and syncing the file's current on-disk content to it before asking. file
+// may be relative to Manager's root or absolute.
+func (m *Manager) SignatureHelp(
+	ctx context.Context, name, file string, line, column int,
+) (SignatureHelp, error) {
+	proc, path, err := m.prepare(ctx, name, file)
+	if err != nil {
+		return SignatureHelp{}, err
+	}
+
+	result, err := proc.currentServer().SignatureHelp(ctx, &protocol.SignatureHelpParams{
+		TextDocumentPositionParams: textDocumentPosition(path, line, column),
+	})
+	if err != nil {
+		return SignatureHelp{}, fmt.Errorf("signatureHelp: %w", err)
+	}
+	return signatureHelpFromProtocol(result)
+}
+
 // prepare resolves file, waits for name's server to be ready, and syncs
 // file's current on-disk content to it — the setup every LSP position
 // request needs before it can ask the server anything.
@@ -391,6 +434,110 @@ func locationsFromDefinitionResult(
 		return nil, fmt.Errorf(
 			"definition for %s: unsupported result shape %T (linkSupport was not advertised)",
 			requestedPath, result)
+	}
+}
+
+// signatureHelpFromProtocol converts a signature help result into the shape
+// a coding agent reads. A server with nothing to say about the call site
+// answers null, which is an empty result rather than a failure.
+func signatureHelpFromProtocol(result *protocol.SignatureHelp) (SignatureHelp, error) {
+	if result == nil || len(result.Signatures) == 0 {
+		return SignatureHelp{}, nil
+	}
+
+	active := activeSignatureIndex(result)
+	help := SignatureHelp{
+		Signatures:      make([]Signature, len(result.Signatures)),
+		ActiveSignature: active,
+		ActiveParameter: activeParameterIndex(result, active),
+	}
+	for i, signature := range result.Signatures {
+		labels, err := parameterLabels(signature)
+		if err != nil {
+			return SignatureHelp{}, err
+		}
+		help.Signatures[i] = Signature{
+			Label:         signature.Label,
+			Documentation: textFromTooltip(signature.Documentation),
+			Parameters:    labels,
+		}
+	}
+	return help, nil
+}
+
+// activeSignatureIndex reads which signature the server means. The spec
+// defaults an omitted index, and one past the end of the server's own list,
+// to the first signature.
+//
+// Precondition: result holds at least one signature, so the index it returns
+// is always a valid one for callers to index Signatures with.
+func activeSignatureIndex(result *protocol.SignatureHelp) int {
+	if result.ActiveSignature == nil {
+		return 0
+	}
+	index := int(*result.ActiveSignature)
+	if index < 0 || index >= len(result.Signatures) {
+		return 0
+	}
+	return index
+}
+
+// activeParameterIndex reads which parameter of the active signature the
+// cursor is on. Since LSP 3.16 the active signature carries its own
+// activeParameter, which takes precedence over the whole result's. Either
+// one defaults to the first parameter when it is absent, and when it names a
+// parameter the active signature does not hold.
+//
+// A server may also send an explicit null, meaning no parameter is active at
+// all. That answer is only legal for a client that advertises
+// noActiveParameterSupport, which Waythrough does not, so it reads as absent.
+func activeParameterIndex(result *protocol.SignatureHelp, activeSignature int) int {
+	signature := result.Signatures[activeSignature]
+
+	index, ok := signature.ActiveParameter.Get()
+	if !ok {
+		index, ok = result.ActiveParameter.Get()
+	}
+	if !ok || int(index) >= len(signature.Parameters) {
+		return 0
+	}
+	return int(index)
+}
+
+// parameterLabels reads each parameter's label. handshake() advertises no
+// textDocument.signatureHelp capabilities, so a spec-compliant server must
+// answer with a label string, not with a pair of offsets into the signature
+// label.
+func parameterLabels(signature protocol.SignatureInformation) ([]string, error) {
+	labels := make([]string, len(signature.Parameters))
+	for i, parameter := range signature.Parameters {
+		label, ok := parameter.Label.(protocol.String)
+		if !ok {
+			return nil, fmt.Errorf(
+				"signatureHelp for %q: unsupported parameter label shape %T "+
+					"(labelOffsetSupport was not advertised)",
+				signature.Label, parameter.Label)
+		}
+		labels[i] = string(label)
+	}
+	return labels, nil
+}
+
+// textFromTooltip flattens a field the protocol allows as either a plain
+// string or MarkupContent — a signature's documentation, a diagnostic's
+// message — into the text a coding agent reads. An absent field flattens to
+// the empty string.
+func textFromTooltip(tooltip protocol.InlayHintTooltip) string {
+	switch v := tooltip.(type) {
+	case protocol.String:
+		return string(v)
+	case *protocol.MarkupContent:
+		if v == nil {
+			return ""
+		}
+		return v.Value
+	default:
+		return ""
 	}
 }
 

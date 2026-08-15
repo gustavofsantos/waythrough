@@ -49,6 +49,7 @@ var (
 	renameOtherLine  = flag.Int("rename-other-line", 0, "0-based line of the canned edit in -rename-other-file")
 	renameOtherCol   = flag.Int("rename-other-column", 0, "0-based character where the canned edit in -rename-other-file starts")
 	renameOtherLen   = flag.Int("rename-other-length", 0, "number of characters the canned edit in -rename-other-file replaces")
+	signatureHelp    = flag.String("signature-help", "", "raw JSON result to answer textDocument/signatureHelp with; empty means no signature help (null). A signature help result nests signatures, per-parameter labels, and two levels of active-index, so a test states the whole canned payload here rather than through one scalar flag per field")
 	syncLog          = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
 
 	openDocs    = map[string]bool{}
@@ -110,6 +111,8 @@ func main() {
 			handleReferences(msg)
 		case "textDocument/rename":
 			handleRename(msg)
+		case "textDocument/signatureHelp":
+			handleSignatureHelp(msg)
 		}
 	}
 }
@@ -277,6 +280,23 @@ func handleRename(msg message) {
 		entries = append(entries, fmt.Sprintf("%q:[%s]", fileURI, strings.Join(edits, ",")))
 	}
 	respond(msg.ID, fmt.Sprintf(`{"changes":{%s}}`, strings.Join(entries, ",")))
+}
+
+// handleSignatureHelp answers textDocument/signatureHelp. Like
+// handleDefinition, it errors if the document was never opened, and
+// otherwise echoes the -signature-help payload back verbatim, or null when
+// that flag is empty.
+func handleSignatureHelp(msg message) {
+	docURI := documentURI(msg.Params)
+	if !openDocs[docURI] {
+		respondError(msg.ID, -32000, fmt.Sprintf("document not open: %s", docURI))
+		return
+	}
+	if *signatureHelp == "" {
+		respond(msg.ID, "null")
+		return
+	}
+	respond(msg.ID, *signatureHelp)
 }
 
 func canonEdit(line, column, length int, newText string) string {
