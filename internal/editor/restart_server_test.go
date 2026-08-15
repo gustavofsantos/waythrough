@@ -87,10 +87,14 @@ var _ = Describe("restart_server", func() {
 
 			restart := callRestartTool(ctx, session, "fake")
 			Expect(restart.IsError).To(BeFalse(), func() string { return errorText(restart) })
+			// Status is what the tool answers whenever the restart succeeded,
+			// so this reads the output shape rather than the wait behind it.
+			// The wait itself is pinned in internal/lsp, against a server
+			// that reports progress for the work its restart repeats.
 			Expect(decodeToolOutput[restartToolOutput](restart)).To(Equal(restartToolOutput{
 				Server: "fake",
 				Status: "ready",
-			}), "the call must not return until the replacement can answer")
+			}))
 
 			after := callTool(ctx, session, "get_definition", "main.fake", 1, 1)
 			Expect(after.IsError).To(BeFalse(), func() string { return errorText(after) })

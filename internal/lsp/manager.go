@@ -296,6 +296,14 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 // The replacement spawns on the lifetime context Start was given, never on
 // ctx. ctx bounds only the wait: how long the stop and the new readiness
 // gate may take before Restart gives up on them.
+//
+// One narrow case answers late. An attempt that has claimed its place but
+// not yet published a process has nothing to stop, so a Restart that lands
+// inside those few instructions leaves that attempt running and waits out
+// toolCallTimeout before reporting the server still starting. The server
+// itself is unharmed, and the request it queued is spent on the next exit
+// rather than lost. Closing this would cost a retry loop around a window
+// no larger than one spawn, which is not a trade this design makes.
 func (m *Manager) Restart(ctx context.Context, name string) error {
 	proc, err := m.serverNamed(name)
 	if err != nil {
