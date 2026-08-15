@@ -2,7 +2,6 @@ package editor_test
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -40,14 +39,6 @@ func callRenameTool(
 	return result
 }
 
-func decodeRenameOutput(result *mcp.CallToolResult) renameToolOutput {
-	text, ok := result.Content[0].(*mcp.TextContent)
-	Expect(ok).To(BeTrue())
-	var out renameToolOutput
-	Expect(json.Unmarshal([]byte(text.Text), &out)).To(Succeed())
-	return out
-}
-
 var _ = Describe("rename_symbol", func() {
 	var (
 		ctx    context.Context
@@ -80,7 +71,7 @@ var _ = Describe("rename_symbol", func() {
 			result := callRenameTool(ctx, session, "main.fake", 1, 7, "planet")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 
-			out := decodeRenameOutput(result)
+			out := decodeToolOutput[renameToolOutput](result)
 			Expect(out.Edits).To(Equal([]toolEdit{
 				{
 					File:      filepath.Join(root, "main.fake"),
@@ -108,7 +99,7 @@ var _ = Describe("rename_symbol", func() {
 
 			result := callRenameTool(ctx, session, "main.fake", 1, 1, "renamed")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
-			Expect(decodeRenameOutput(result).Edits).To(BeEmpty())
+			Expect(decodeToolOutput[renameToolOutput](result).Edits).To(BeEmpty())
 		})
 	})
 

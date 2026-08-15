@@ -58,10 +58,14 @@ func callTool(
 	return result
 }
 
-func decodeOutput(result *mcp.CallToolResult) toolOutput {
+// decodeToolOutput reads a successful tool call's structured output. Every
+// tool answers the same way — one text block holding the JSON of that
+// tool's own output shape — so only the shape a spec expects differs.
+func decodeToolOutput[Output any](result *mcp.CallToolResult) Output {
 	text, ok := result.Content[0].(*mcp.TextContent)
 	Expect(ok).To(BeTrue())
-	var out toolOutput
+
+	var out Output
 	Expect(json.Unmarshal([]byte(text.Text), &out)).To(Succeed())
 	return out
 }
@@ -121,7 +125,7 @@ var _ = Describe("get_definition", func() {
 			result := callTool(ctx, session, "get_definition", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 
-			out := decodeOutput(result)
+			out := decodeToolOutput[toolOutput](result)
 			Expect(out.Locations).To(Equal([]toolLocation{
 				{File: filepath.Join(root, "main.fake"), Line: 5, Column: 3},
 			}))
@@ -138,7 +142,7 @@ var _ = Describe("get_definition", func() {
 
 			result := callTool(ctx, session, "get_definition", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
-			Expect(decodeOutput(result).Locations).To(BeEmpty())
+			Expect(decodeToolOutput[toolOutput](result).Locations).To(BeEmpty())
 		})
 	})
 

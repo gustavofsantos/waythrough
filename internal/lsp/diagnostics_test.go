@@ -2,9 +2,7 @@ package lsp_test
 
 import (
 	"context"
-	"os"
 	"path/filepath"
-	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -16,12 +14,6 @@ import (
 // and returns it with the path of the file every spec below asks about.
 func diagnosticsManager(ctx context.Context, args ...string) (*lsp.Manager, string) {
 	return fakeManager(ctx, "greet()", args...)
-}
-
-func readRequestLog(path string) []string {
-	data, err := os.ReadFile(path)
-	Expect(err).NotTo(HaveOccurred())
-	return strings.Split(strings.TrimSpace(string(data)), "\n")
 }
 
 var _ = Describe("Manager.Diagnostics", func() {
@@ -53,8 +45,8 @@ var _ = Describe("Manager.Diagnostics", func() {
 			// asked. Without it, an empty log would pass the next line while
 			// proving nothing. Both entries are requests, which the fake has
 			// answered by now, unlike a notification it may still be reading.
-			Expect(readRequestLog(requestLog)).To(ContainElement("initialize"))
-			Expect(readRequestLog(requestLog)).NotTo(ContainElement("textDocument/diagnostic"),
+			Expect(logLines(requestLog)).To(ContainElement("initialize"))
+			Expect(logLines(requestLog)).NotTo(ContainElement("textDocument/diagnostic"),
 				"the capability check must answer on its own, without spending a round trip")
 		})
 	})

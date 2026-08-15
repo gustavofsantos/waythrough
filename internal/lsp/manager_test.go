@@ -47,15 +47,26 @@ func fakeManager(ctx context.Context, content string, args ...string) (*lsp.Mana
 	return manager, file
 }
 
-func readSyncLog(path string) []syncEvent {
+// logLines reads one of the append-only logs fakelsp writes, as one record
+// per line with the blank lines dropped. Every such log is read this way,
+// and only what a line holds differs between them.
+func logLines(path string) []string {
 	data, err := os.ReadFile(path)
 	Expect(err).NotTo(HaveOccurred())
 
-	var events []syncEvent
+	var lines []string
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if line == "" {
 			continue
 		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func readSyncLog(path string) []syncEvent {
+	var events []syncEvent
+	for _, line := range logLines(path) {
 		var e syncEvent
 		Expect(json.Unmarshal([]byte(line), &e)).To(Succeed())
 		events = append(events, e)

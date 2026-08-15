@@ -2,12 +2,9 @@ package editor_test
 
 import (
 	"context"
-	"encoding/json"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/gustavofsantos/waythrough/internal/lsp"
 )
@@ -22,14 +19,6 @@ type signatureHelpToolOutput struct {
 	Signatures      []toolSignature `json:"signatures"`
 	ActiveSignature int             `json:"active_signature"`
 	ActiveParameter int             `json:"active_parameter"`
-}
-
-func decodeSignatureHelpOutput(result *mcp.CallToolResult) signatureHelpToolOutput {
-	text, ok := result.Content[0].(*mcp.TextContent)
-	Expect(ok).To(BeTrue())
-	var out signatureHelpToolOutput
-	Expect(json.Unmarshal([]byte(text.Text), &out)).To(Succeed())
-	return out
 }
 
 var _ = Describe("signature_help", func() {
@@ -74,7 +63,8 @@ var _ = Describe("signature_help", func() {
 			result := callTool(ctx, session, "signature_help", "main.fake", 1, 16)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 
-			Expect(decodeSignatureHelpOutput(result)).To(Equal(signatureHelpToolOutput{
+			out := decodeToolOutput[signatureHelpToolOutput](result)
+			Expect(out).To(Equal(signatureHelpToolOutput{
 				Signatures: []toolSignature{
 					{
 						Label:         "greet(name)",
@@ -102,7 +92,7 @@ var _ = Describe("signature_help", func() {
 
 			result := callTool(ctx, session, "signature_help", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
-			Expect(decodeSignatureHelpOutput(result).Signatures).To(BeEmpty())
+			Expect(decodeToolOutput[signatureHelpToolOutput](result).Signatures).To(BeEmpty())
 		})
 	})
 })

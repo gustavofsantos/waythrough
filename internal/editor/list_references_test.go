@@ -36,7 +36,7 @@ var _ = Describe("list_references", func() {
 			result := callTool(ctx, session, "list_references", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 
-			out := decodeOutput(result)
+			out := decodeToolOutput[toolOutput](result)
 			Expect(out.Locations).To(Equal([]toolLocation{
 				{File: filepath.Join(root, "main.fake"), Line: 3, Column: 2},
 				{File: filepath.Join(root, "main.fake"), Line: 4, Column: 2},
@@ -54,7 +54,7 @@ var _ = Describe("list_references", func() {
 
 			result := callTool(ctx, session, "list_references", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
-			Expect(decodeOutput(result).Locations).To(BeEmpty())
+			Expect(decodeToolOutput[toolOutput](result).Locations).To(BeEmpty())
 		})
 	})
 

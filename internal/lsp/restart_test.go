@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -21,14 +20,8 @@ import (
 // the next across a restart, which no other reading of a language server
 // makes visible.
 func readInstanceLog(path string) []int {
-	data, err := os.ReadFile(path)
-	Expect(err).NotTo(HaveOccurred())
-
 	var pids []int
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
+	for _, line := range logLines(path) {
 		pid, err := strconv.Atoi(line)
 		Expect(err).NotTo(HaveOccurred(), "each instance-log line holds one pid")
 		pids = append(pids, pid)

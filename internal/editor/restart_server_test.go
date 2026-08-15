@@ -36,14 +36,6 @@ func callRestartTool(
 	return result
 }
 
-func decodeRestartOutput(result *mcp.CallToolResult) restartToolOutput {
-	text, ok := result.Content[0].(*mcp.TextContent)
-	Expect(ok).To(BeTrue())
-	var out restartToolOutput
-	Expect(json.Unmarshal([]byte(text.Text), &out)).To(Succeed())
-	return out
-}
-
 // syncedDocuments reads the didOpen/didChange notifications fakelsp's
 // -sync-log recorded, as "method@version". That pair is what tells a fresh
 // server session, which learns a document through didOpen at version 1,
@@ -95,14 +87,14 @@ var _ = Describe("restart_server", func() {
 
 			restart := callRestartTool(ctx, session, "fake")
 			Expect(restart.IsError).To(BeFalse(), func() string { return errorText(restart) })
-			Expect(decodeRestartOutput(restart)).To(Equal(restartToolOutput{
+			Expect(decodeToolOutput[restartToolOutput](restart)).To(Equal(restartToolOutput{
 				Server: "fake",
 				Status: "ready",
 			}), "the call must not return until the replacement can answer")
 
 			after := callTool(ctx, session, "get_definition", "main.fake", 1, 1)
 			Expect(after.IsError).To(BeFalse(), func() string { return errorText(after) })
-			Expect(decodeOutput(after).Locations).To(Equal([]toolLocation{
+			Expect(decodeToolOutput[toolOutput](after).Locations).To(Equal([]toolLocation{
 				{File: filepath.Join(root, "main.fake"), Line: 5, Column: 3},
 			}))
 

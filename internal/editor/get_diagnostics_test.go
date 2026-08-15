@@ -2,7 +2,6 @@ package editor_test
 
 import (
 	"context"
-	"encoding/json"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -38,14 +37,6 @@ func callDiagnosticsTool(
 	})
 	Expect(err).NotTo(HaveOccurred(), "a tool-level failure is not a protocol error")
 	return result
-}
-
-func decodeDiagnosticsOutput(result *mcp.CallToolResult) diagnosticsToolOutput {
-	text, ok := result.Content[0].(*mcp.TextContent)
-	Expect(ok).To(BeTrue())
-	var out diagnosticsToolOutput
-	Expect(json.Unmarshal([]byte(text.Text), &out)).To(Succeed())
-	return out
 }
 
 var _ = Describe("get_diagnostics", func() {
@@ -97,7 +88,8 @@ var _ = Describe("get_diagnostics", func() {
 			result := callDiagnosticsTool(ctx, session, "main.fake")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 
-			Expect(decodeDiagnosticsOutput(result).Diagnostics).To(Equal([]toolDiagnostic{
+			out := decodeToolOutput[diagnosticsToolOutput](result)
+			Expect(out.Diagnostics).To(Equal([]toolDiagnostic{
 				{
 					StartLine: 1, StartColumn: 1,
 					EndLine: 1, EndColumn: 8,
