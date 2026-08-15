@@ -342,7 +342,7 @@ func readMessage(r *bufio.Reader) (message, error) {
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
-			return message{}, err
+			return message{}, fmt.Errorf("read header line: %w", err)
 		}
 		if line == "\r\n" {
 			break
@@ -352,12 +352,12 @@ func readMessage(r *bufio.Reader) (message, error) {
 
 	body := make([]byte, length)
 	if _, err := io.ReadFull(r, body); err != nil {
-		return message{}, err
+		return message{}, fmt.Errorf("read body of %d bytes: %w", length, err)
 	}
 
 	var msg message
 	if err := json.Unmarshal(body, &msg); err != nil {
-		return message{}, err
+		return message{}, fmt.Errorf("decode body: %w", err)
 	}
 	return msg, nil
 }

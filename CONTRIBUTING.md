@@ -56,6 +56,44 @@ The script runs these checks, in order:
 5. `go mod tidy -diff` — module file tidiness
 6. `go test -race` — the test suite
 
+## Two rules the linter cannot check
+
+`.golangci.yml` enables the rules from TigerBeetle's
+[TIGER_STYLE.md](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md)
+that this repo accepts and that a Go linter can check. Where
+TigerStyle gives a number, the config uses it, such as the 100-column
+line limit. Where TigerStyle gives none, the config uses a threshold
+chosen for this repo. This repo rejects four other TigerStyle rules
+outright, because each one fights `gofmt` or Go's own model.
+
+Two more rules have no Go tool at all, and a checker built for either
+would measure the wrong thing. A reviewer checks these two by reading
+the change.
+
+**State what a function assumes.** TigerStyle asks for at least two
+assertions per function: one on what comes in, one on what goes out.
+Go has no `assert` that a release build compiles away. In Go the same
+rule becomes an explicit guard that returns an error. It can also
+become a comment that names an invariant a caller cannot break. A
+checker that counted `if err != nil` blocks would reward padding, not
+thought.
+
+Copy the shape of `editor.resolveTarget`: it names the 1-based rule,
+and its error text says which value broke it.
+
+**Bound every loop.** A loop with no lexical bound must say, in a
+comment on the loop, what ends it. A syntactic checker cannot tell a
+bounded loop from an unbounded one here. `lsp.runServer` uses
+`for attempt := 0; ; attempt++`, which reads as unbounded. It stops on
+the restart limit, on shutdown, and on a done context. Such a checker
+would flag the one loop the design needs, and would pass a loop whose
+bound is a variable that never decreases.
+
+The issue file
+`~/engineering/issues/2026-08-15-adopt-tigerstyle-static-checks.md`
+records both rules, together with the four TigerStyle rules this repo
+rejects.
+
 ## Write and run tests
 
 Waythrough tests with [Ginkgo](https://onsi.github.io/ginkgo/) and

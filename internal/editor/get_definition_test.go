@@ -47,7 +47,9 @@ func connect(ctx context.Context, manager *lsp.Manager, cfg config.Config) *mcp.
 	return session
 }
 
-func callTool(ctx context.Context, session *mcp.ClientSession, name, file string, line, column int) *mcp.CallToolResult {
+func callTool(
+	ctx context.Context, session *mcp.ClientSession, name, file string, line, column int,
+) *mcp.CallToolResult {
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      name,
 		Arguments: map[string]any{"file": file, "line": line, "column": column},
@@ -62,6 +64,14 @@ func decodeOutput(result *mcp.CallToolResult) toolOutput {
 	var out toolOutput
 	Expect(json.Unmarshal([]byte(text.Text), &out)).To(Succeed())
 	return out
+}
+
+// writeFile creates name under root with content and returns its full path,
+// the fixture every editor spec needs before it can ask about a position.
+func writeFile(root, name, content string) string {
+	path := filepath.Join(root, name)
+	Expect(os.WriteFile(path, []byte(content), 0o644)).To(Succeed())
+	return path
 }
 
 func errorText(result *mcp.CallToolResult) string {
@@ -100,7 +110,7 @@ var _ = Describe("get_definition", func() {
 
 	When("the file's language server is ready and reports a definition", func() {
 		It("syncs the file's current content and returns the location, 1-based", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello world"), 0o644)).To(Succeed())
+			writeFile(root, "main.fake", "hello world")
 
 			cfg := fakeConfig("-definition-line=4", "-definition-column=2")
 			manager := lsp.NewManager(root, cfg.LanguageServers)
@@ -120,7 +130,7 @@ var _ = Describe("get_definition", func() {
 
 	When("the language server reports no definition for the position", func() {
 		It("returns an empty result, not an error", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello"), 0o644)).To(Succeed())
+			writeFile(root, "main.fake", "hello")
 
 			cfg := fakeConfig() // no -definition-line: fakelsp reports no definition
 			manager := lsp.NewManager(root, cfg.LanguageServers)
@@ -134,7 +144,7 @@ var _ = Describe("get_definition", func() {
 
 	When("the line is less than 1", func() {
 		It("returns a tool error stating that line and column are 1-based", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello"), 0o644)).To(Succeed())
+			writeFile(root, "main.fake", "hello")
 
 			cfg := fakeConfig()
 			manager := lsp.NewManager(root, cfg.LanguageServers)
@@ -148,7 +158,7 @@ var _ = Describe("get_definition", func() {
 
 	When("the column is less than 1", func() {
 		It("returns a tool error stating that line and column are 1-based", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello"), 0o644)).To(Succeed())
+			writeFile(root, "main.fake", "hello")
 
 			cfg := fakeConfig()
 			manager := lsp.NewManager(root, cfg.LanguageServers)

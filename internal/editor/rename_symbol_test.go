@@ -3,7 +3,6 @@ package editor_test
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,7 +26,10 @@ type renameToolOutput struct {
 	Edits []toolEdit `json:"edits"`
 }
 
-func callRenameTool(ctx context.Context, session *mcp.ClientSession, file string, line, column int, newName string) *mcp.CallToolResult {
+func callRenameTool(
+	ctx context.Context, session *mcp.ClientSession,
+	file string, line, column int, newName string,
+) *mcp.CallToolResult {
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "rename_symbol",
 		Arguments: map[string]any{
@@ -61,10 +63,9 @@ var _ = Describe("rename_symbol", func() {
 	AfterEach(func() { cancel() })
 
 	When("the file's language server is ready and reports edits spanning multiple files", func() {
-		It("syncs the requested file's current content and returns every edit, 1-based, across every affected file", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello world"), 0o644)).To(Succeed())
-			otherFile := filepath.Join(root, "other.fake")
-			Expect(os.WriteFile(otherFile, []byte("hello again"), 0o644)).To(Succeed())
+		It("syncs the file and returns every edit, 1-based, in every file it touches", func() {
+			writeFile(root, "main.fake", "hello world")
+			otherFile := writeFile(root, "other.fake", "hello again")
 
 			cfg := fakeConfig(
 				"-rename-line=0", "-rename-column=6", "-rename-length=5",
@@ -81,15 +82,25 @@ var _ = Describe("rename_symbol", func() {
 
 			out := decodeRenameOutput(result)
 			Expect(out.Edits).To(Equal([]toolEdit{
-				{File: filepath.Join(root, "main.fake"), StartLine: 1, StartColumn: 7, EndLine: 1, EndColumn: 12, NewText: "planet"},
-				{File: otherFile, StartLine: 3, StartColumn: 2, EndLine: 3, EndColumn: 7, NewText: "planet"},
+				{
+					File:      filepath.Join(root, "main.fake"),
+					StartLine: 1, StartColumn: 7,
+					EndLine: 1, EndColumn: 12,
+					NewText: "planet",
+				},
+				{
+					File:      otherFile,
+					StartLine: 3, StartColumn: 2,
+					EndLine: 3, EndColumn: 7,
+					NewText: "planet",
+				},
 			}))
 		})
 	})
 
 	When("the language server declines to rename the symbol", func() {
 		It("returns an empty list, not an error", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello"), 0o644)).To(Succeed())
+			writeFile(root, "main.fake", "hello")
 
 			cfg := fakeConfig() // no -rename-line: fakelsp declines the rename
 			manager := lsp.NewManager(root, cfg.LanguageServers)
@@ -103,7 +114,7 @@ var _ = Describe("rename_symbol", func() {
 
 	When("the new name is empty", func() {
 		It("returns a tool error, not a rename that blanks out the symbol", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello"), 0o644)).To(Succeed())
+			writeFile(root, "main.fake", "hello")
 
 			cfg := fakeConfig("-rename-line=0", "-rename-column=0", "-rename-length=5")
 			manager := lsp.NewManager(root, cfg.LanguageServers)

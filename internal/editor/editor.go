@@ -31,8 +31,11 @@ func New(manager *lsp.Manager, cfg config.Config) *mcp.Server {
 		Description: "List every place the symbol at a file position is used.",
 	}, e.listReferences)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "rename_symbol",
-		Description: "Compute the edits that rename the symbol at a file position, across every file it touches. Does not write the edits to disk — apply them yourself. Columns are a byte-offset approximation and may be off on lines with non-ASCII characters before the edit.",
+		Name: "rename_symbol",
+		Description: "Compute the edits that rename the symbol at a file position, " +
+			"across every file it touches. Does not write the edits to disk — " +
+			"apply them yourself. Columns are a byte-offset approximation and may " +
+			"be off on lines with non-ASCII characters before the edit.",
 	}, e.renameSymbol)
 
 	return server
@@ -54,7 +57,7 @@ func routeByExtension(cfg config.Config) map[string]string {
 }
 
 type position struct {
-	File   string `json:"file" jsonschema:"path to the file, absolute or relative to the project root"`
+	File   string `json:"file" jsonschema:"file path, absolute or relative to the project root"`
 	Line   int    `json:"line" jsonschema:"1-based line number"`
 	Column int    `json:"column" jsonschema:"1-based column number"`
 }
@@ -90,7 +93,9 @@ type editsOutput struct {
 	Edits []edit `json:"edits"`
 }
 
-func (e *editor) getDefinition(ctx context.Context, _ *mcp.CallToolRequest, in position) (*mcp.CallToolResult, locationsOutput, error) {
+func (e *editor) getDefinition(
+	ctx context.Context, _ *mcp.CallToolRequest, in position,
+) (*mcp.CallToolResult, locationsOutput, error) {
 	name, err := e.resolveTarget(in)
 	if err != nil {
 		return nil, locationsOutput{}, err
@@ -103,7 +108,9 @@ func (e *editor) getDefinition(ctx context.Context, _ *mcp.CallToolRequest, in p
 	return nil, toLocationsOutput(locations), nil
 }
 
-func (e *editor) listReferences(ctx context.Context, _ *mcp.CallToolRequest, in position) (*mcp.CallToolResult, locationsOutput, error) {
+func (e *editor) listReferences(
+	ctx context.Context, _ *mcp.CallToolRequest, in position,
+) (*mcp.CallToolResult, locationsOutput, error) {
 	name, err := e.resolveTarget(in)
 	if err != nil {
 		return nil, locationsOutput{}, err
@@ -116,7 +123,9 @@ func (e *editor) listReferences(ctx context.Context, _ *mcp.CallToolRequest, in 
 	return nil, toLocationsOutput(locations), nil
 }
 
-func (e *editor) renameSymbol(ctx context.Context, _ *mcp.CallToolRequest, in renamePosition) (*mcp.CallToolResult, editsOutput, error) {
+func (e *editor) renameSymbol(
+	ctx context.Context, _ *mcp.CallToolRequest, in renamePosition,
+) (*mcp.CallToolResult, editsOutput, error) {
 	if in.NewName == "" {
 		return nil, editsOutput{}, fmt.Errorf("new_name must not be empty")
 	}
@@ -138,7 +147,9 @@ func (e *editor) renameSymbol(ctx context.Context, _ *mcp.CallToolRequest, in re
 // needs before it can ask a language server anything.
 func (e *editor) resolveTarget(in position) (string, error) {
 	if in.Line < 1 || in.Column < 1 {
-		return "", fmt.Errorf("line and column are 1-based and must be at least 1, got line=%d column=%d", in.Line, in.Column)
+		return "", fmt.Errorf(
+			"line and column are 1-based and must be at least 1, got line=%d column=%d",
+			in.Line, in.Column)
 	}
 
 	ext := filepath.Ext(in.File)

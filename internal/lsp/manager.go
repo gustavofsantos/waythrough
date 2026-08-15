@@ -5,6 +5,7 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -246,7 +247,7 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 			return fmt.Errorf("language server %q is still starting", name)
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return fmt.Errorf("waiting for language server %q: %w", name, ctx.Err())
 		}
 	}
 }
@@ -265,7 +266,9 @@ func (m *Manager) Status(name string) (Status, error) {
 // line/column in file, waiting for the server to be ready first and
 // syncing the file's current on-disk content to it before asking. file may
 // be relative to Manager's root or absolute.
-func (m *Manager) Definition(ctx context.Context, name, file string, line, column int) ([]Location, error) {
+func (m *Manager) Definition(
+	ctx context.Context, name, file string, line, column int,
+) ([]Location, error) {
 	proc, path, err := m.prepare(ctx, name, file)
 	if err != nil {
 		return nil, err
@@ -284,7 +287,9 @@ func (m *Manager) Definition(ctx context.Context, name, file string, line, colum
 // 1-based line/column in file, waiting for the server to be ready first and
 // syncing the file's current on-disk content to it before asking. file may
 // be relative to Manager's root or absolute.
-func (m *Manager) References(ctx context.Context, name, file string, line, column int) ([]Location, error) {
+func (m *Manager) References(
+	ctx context.Context, name, file string, line, column int,
+) ([]Location, error) {
 	proc, path, err := m.prepare(ctx, name, file)
 	if err != nil {
 		return nil, err
@@ -310,7 +315,9 @@ func (m *Manager) References(ctx context.Context, name, file string, line, colum
 // server to be ready first and syncing the file's current on-disk content
 // to it before asking. file may be relative to Manager's root or absolute.
 // Rename does not write the edit to disk; the caller applies it.
-func (m *Manager) Rename(ctx context.Context, name, file string, line, column int, newName string) ([]Edit, error) {
+func (m *Manager) Rename(
+	ctx context.Context, name, file string, line, column int, newName string,
+) ([]Edit, error) {
 	proc, path, err := m.prepare(ctx, name, file)
 	if err != nil {
 		return nil, err
@@ -358,7 +365,9 @@ func (m *Manager) resolvePath(file string) string {
 	return filepath.Join(m.root, file)
 }
 
-func locationsFromDefinitionResult(requestedPath string, result protocol.DefinitionResult) ([]Location, error) {
+func locationsFromDefinitionResult(
+	requestedPath string, result protocol.DefinitionResult,
+) ([]Location, error) {
 	switch v := result.(type) {
 	case nil:
 		return nil, nil
@@ -374,7 +383,9 @@ func locationsFromDefinitionResult(requestedPath string, result protocol.Definit
 		}
 		return locations, nil
 	default:
-		return nil, fmt.Errorf("definition for %s: unsupported result shape %T (linkSupport was not advertised)", requestedPath, result)
+		return nil, fmt.Errorf(
+			"definition for %s: unsupported result shape %T (linkSupport was not advertised)",
+			requestedPath, result)
 	}
 }
 
@@ -388,7 +399,9 @@ func editsFromWorkspaceEdit(result *protocol.WorkspaceEdit) ([]Edit, error) {
 		return nil, nil
 	}
 	if len(result.DocumentChanges) > 0 {
-		return nil, fmt.Errorf("rename: unsupported result shape: documentChanges (workspace.workspaceEdit.documentChanges was not advertised)")
+		return nil, errors.New(
+			"rename: unsupported result shape: documentChanges " +
+				"(workspace.workspaceEdit.documentChanges was not advertised)")
 	}
 
 	var edits []Edit
@@ -505,7 +518,7 @@ func (p *serverProcess) currentServer() protocol.Server {
 func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("read file: %w", err)
 	}
 	text := string(content)
 
@@ -522,6 +535,9 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 
 	docURI := uri.File(path)
 
+	// Each notification names itself in its error. The two share a return
+	// path but not a cause, so one shared wrap would label a failed didOpen
+	// as a didChange, and vice versa.
 	if !wasOpen {
 		err = server.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
 			TextDocument: protocol.TextDocumentItem{
@@ -531,6 +547,9 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 				Text:       text,
 			},
 		})
+		if err != nil {
+			return fmt.Errorf("didOpen: %w", err)
+		}
 		prev = openFile{content: text, version: 1}
 	} else if prev.content != text {
 		prev.version++
@@ -544,9 +563,9 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 				&protocol.TextDocumentContentChangeWholeDocument{Text: text},
 			},
 		})
-	}
-	if err != nil {
-		return err
+		if err != nil {
+			return fmt.Errorf("didChange: %w", err)
+		}
 	}
 
 	p.mu.Lock()
@@ -586,14 +605,14 @@ func (p *serverProcess) startProcess(ctx context.Context) error {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("stdin pipe for %s: %w", p.entry.Command, err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("stdout pipe for %s: %w", p.entry.Command, err)
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return fmt.Errorf("start %s: %w", p.entry.Command, err)
 	}
 
 	stream := jsonrpc2.NewStream(pipeRWC{ReadCloser: stdout, WriteCloser: stdin})

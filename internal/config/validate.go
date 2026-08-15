@@ -34,7 +34,8 @@ func Validate(cfg Config) error {
 
 		for ext := range entry.Filetypes {
 			if other, claimed := owner[ext]; claimed {
-				errs = append(errs, fmt.Errorf("%s: filetype %q is already claimed by %s", id, ext, other))
+				errs = append(errs, fmt.Errorf(
+					"%s: filetype %q is already claimed by %s", id, ext, other))
 				continue
 			}
 			owner[ext] = id

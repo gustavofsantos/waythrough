@@ -28,7 +28,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 // configFlag registers the --config flag shared by every subcommand that
 // reads waythrough.yaml, and returns the value cobra will fill in.
 func configFlag(cmd *cobra.Command, verb string) *string {
-	return cmd.Flags().String("config", "waythrough.yaml", fmt.Sprintf("path to the config file to %s", verb))
+	usage := fmt.Sprintf("path to the config file to %s", verb)
+	return cmd.Flags().String("config", "waythrough.yaml", usage)
 }
 
 func newRootCommand() *cobra.Command {

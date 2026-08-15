@@ -21,7 +21,10 @@ type client struct {
 // new token. Waythrough never supplies its own workDoneToken in initialize,
 // so this request is the only path a server has to start reporting, which
 // keeps the readiness gate's token tracking complete.
-func (c *client) WorkDoneProgressCreate(ctx context.Context, params *protocol.WorkDoneProgressCreateParams) error {
+func (c *client) WorkDoneProgressCreate(
+	ctx context.Context,
+	params *protocol.WorkDoneProgressCreateParams,
+) error {
 	c.proc.tokenCreated(tokenKey(params.Token))
 	return nil
 }

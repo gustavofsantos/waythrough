@@ -2,13 +2,12 @@ version: "2"
 
 # Beyond the default tier (errcheck, govet, ineffassign, staticcheck, unused),
 # this enables the checks from TigerBeetle's TIGER_STYLE.md that translate
-# to Go and that this repo already passes with zero violations, so they
-# stand as regression guards, not cleanup work. See the design discussion in
-# ~/engineering/issues/2026-08-15-adopt-tigerstyle-static-checks.md.
-#
-# lll (100-column limit) and wrapcheck (wrap external errors at the
-# boundary) also apply, but need a real fix pass first — tracked in that
-# issue's Tasks, not enabled here yet.
+# to Go. The repo passes all of them, so they stand as regression guards,
+# not cleanup work. See the design discussion in
+# ~/engineering/issues/2026-08-15-adopt-tigerstyle-static-checks.md, which
+# also records the four TigerStyle rules this repo rejects outright and the
+# two it keeps as review discipline for want of any Go tool that checks them
+# (assertion density, and unbounded loops).
 linters:
   default: standard
   enable:
@@ -16,19 +15,35 @@ linters:
     - funlen
     - godot
     - gocyclo
+    - lll
     - nestif
     - nilnil
     - noctx
     - predeclared
     - unparam
+    - wrapcheck
   settings:
     funlen:
       lines: 70
       statements: 60
     gocyclo:
       min-complexity: 15
+    lll:
+      # TigerStyle's own limit. tab-width matches gofmt's tabs to the
+      # 4-column indent TigerStyle assumes, so the count is what a reader
+      # sees on screen rather than one character per indent level.
+      line-length: 100
+      tab-width: 4
     nestif:
       min-complexity: 4
+    wrapcheck:
+      # An error crossing a package boundary must say where it came from —
+      # the OSDI-paper failure TigerStyle cites is a production error whose
+      # message cannot name the call site that produced it. Waythrough's own
+      # packages already wrap at their own boundaries, so re-wrapping an
+      # in-module error only repeats context the message already carries.
+      ignore-package-globs:
+        - github.com/gustavofsantos/waythrough/**
   exclusions:
     rules:
       # fakelsp is test scaffolding for internal/lsp, not production code
@@ -36,4 +51,11 @@ linters:
       # the coverage floor.
       - path: internal/lsp/fakelsp/
         linters:
+          # main() dispatches one case per LSP method it fakes. Splitting it
+          # would hide the message table that makes the fake readable.
           - gocyclo
+          # Its flags are declared in one aligned var block, where each
+          # description states what a test gets by passing that flag.
+          # Wrapping those descriptions breaks the alignment that lets a
+          # reader scan the whole fake's vocabulary at once.
+          - lll

@@ -69,5 +69,8 @@ func runServe(configPath string) error {
 	defer cancel()
 	_ = manager.Shutdown(shutdownCtx)
 
-	return runErr
+	if runErr != nil {
+		return fmt.Errorf("mcp session: %w", runErr)
+	}
+	return nil
 }

@@ -2,7 +2,6 @@ package editor_test
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -28,7 +27,7 @@ var _ = Describe("list_references", func() {
 
 	When("the file's language server is ready and reports references", func() {
 		It("syncs the file's current content and returns every location, 1-based", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello world"), 0o644)).To(Succeed())
+			writeFile(root, "main.fake", "hello world")
 
 			cfg := fakeConfig("-references-line=2", "-references-column=1", "-references-count=2")
 			manager := lsp.NewManager(root, cfg.LanguageServers)
@@ -47,7 +46,7 @@ var _ = Describe("list_references", func() {
 
 	When("the language server reports no references for the position", func() {
 		It("returns an empty list, not an error", func() {
-			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello"), 0o644)).To(Succeed())
+			writeFile(root, "main.fake", "hello")
 
 			cfg := fakeConfig() // no -references-line: fakelsp reports no references
 			manager := lsp.NewManager(root, cfg.LanguageServers)

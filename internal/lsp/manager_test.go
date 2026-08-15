@@ -78,10 +78,12 @@ var _ = Describe("Manager", func() {
 			Expect(manager.Start(ctx)).To(Succeed())
 
 			err := manager.WaitReady(ctx, "fake", 20*time.Millisecond)
-			Expect(err).To(HaveOccurred(), "the server is still indexing and should not be ready yet")
+			Expect(err).To(HaveOccurred(),
+				"the server is still indexing and should not be ready yet")
 
 			err = manager.WaitReady(ctx, "fake", 2*time.Second)
-			Expect(err).NotTo(HaveOccurred(), "the progress token closed, so the server should now be ready")
+			Expect(err).NotTo(HaveOccurred(),
+				"the progress token closed, so the server should now be ready")
 		})
 	})
 
@@ -137,11 +139,12 @@ var _ = Describe("Manager", func() {
 
 			Expect(manager.WaitReady(ctx, "fake", 2*time.Second)).To(Succeed())
 			_, err := os.Stat(marker)
-			Expect(err).NotTo(HaveOccurred(), "expected the first attempt to have crashed and left its marker")
+			Expect(err).NotTo(HaveOccurred(),
+				"expected the first attempt to have crashed and left its marker")
 		})
 	})
 
-	When("a language server exits more times than the restart limit allows within the window", func() {
+	When("a language server exits more times than the restart limit allows", func() {
 		It("stops restarting it and reports it failed", func() {
 			entry := config.LanguageServer{
 				Name:      "fake",
@@ -164,7 +167,7 @@ var _ = Describe("Manager", func() {
 	})
 
 	Describe("Shutdown", func() {
-		It("sends shutdown and exit to a running server and waits for it to exit on its own", func() {
+		It("sends shutdown and exit, then waits for the server to exit on its own", func() {
 			entry := config.LanguageServer{
 				Name:      "fake",
 				Command:   fakelspPath,
@@ -223,7 +226,8 @@ var _ = Describe("Manager", func() {
 			Expect(manager.Start(ctx)).To(Succeed())
 
 			err := manager.WaitReady(ctx, "fake", 2*time.Second)
-			Expect(err).To(HaveOccurred(), "the command does not exist, so the server should fail to start")
+			Expect(err).To(HaveOccurred(),
+				"the command does not exist, so the server should fail to start")
 
 			status, err := manager.Status("fake")
 			Expect(err).NotTo(HaveOccurred())
@@ -268,7 +272,7 @@ var _ = Describe("Manager", func() {
 			}))
 		})
 
-		It("sends the new content via didChange, with the version bumped, when the file has changed since the last sync", func() {
+		It("sends the changed content via didChange, with the version bumped", func() {
 			_, err := manager.Definition(ctx, "fake", file, 1, 1)
 			Expect(err).NotTo(HaveOccurred())
 
