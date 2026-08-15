@@ -49,6 +49,11 @@ var _ = Describe("Manager.Diagnostics", func() {
 			Expect(err).To(MatchError(ContainSubstring(`"fake"`)))
 			Expect(err).To(MatchError(ContainSubstring("pull diagnostics")))
 
+			// The handshake entry proves the log records what the fake was
+			// asked. Without it, an empty log would pass the next line while
+			// proving nothing. Both entries are requests, which the fake has
+			// answered by now, unlike a notification it may still be reading.
+			Expect(readRequestLog(requestLog)).To(ContainElement("initialize"))
 			Expect(readRequestLog(requestLog)).NotTo(ContainElement("textDocument/diagnostic"),
 				"the capability check must answer on its own, without spending a round trip")
 		})
