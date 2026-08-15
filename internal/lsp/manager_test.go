@@ -33,18 +33,32 @@ func fakeManager(ctx context.Context, content string, args ...string) (*lsp.Mana
 	file := filepath.Join(root, "main.fake")
 	Expect(os.WriteFile(file, []byte(content), 0o644)).To(Succeed())
 
-	entry := config.LanguageServer{
+	manager := lsp.NewManager(root, []config.LanguageServer{fakeEntry(args...)})
+	Expect(manager.Start(ctx)).To(Succeed())
+	Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
+	return manager, file
+}
+
+// fakeEntry configures the one "fake" language server every spec here
+// names: fakelsp for the .fake extension, ready as soon as its handshake
+// completes. Only the flags it runs with differ between specs.
+func fakeEntry(args ...string) config.LanguageServer {
+	return config.LanguageServer{
 		Name:      "fake",
 		Command:   fakelspPath,
 		Args:      args,
 		Readiness: config.ReadinessHandshake,
 		Filetypes: map[string]string{".fake": "fake"},
 	}
+}
 
-	manager := lsp.NewManager(root, []config.LanguageServer{entry})
-	Expect(manager.Start(ctx)).To(Succeed())
-	Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
-	return manager, file
+// indexingFakeEntry is fakeEntry under the readiness gate a server with
+// background work uses: ready only once every progress token it opens has
+// closed.
+func indexingFakeEntry(args ...string) config.LanguageServer {
+	entry := fakeEntry(args...)
+	entry.Readiness = config.ReadinessProgress
+	return entry
 }
 
 // logLines reads one of the append-only logs fakelsp writes, as one record
@@ -99,12 +113,7 @@ var _ = Describe("Manager", func() {
 
 	When("a language server reports workDoneProgress for its startup work", func() {
 		It("blocks WaitReady until the progress token closes, then returns", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-progress", "-progress-delay=100ms"},
-				Filetypes: map[string]string{".fake": "fake"},
-			}
+			entry := indexingFakeEntry("-progress", "-progress-delay=100ms")
 
 			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
 				lsp.WithProgressDebounce(20*time.Millisecond))
@@ -123,14 +132,8 @@ var _ = Describe("Manager", func() {
 
 	When("a language server's readiness is handshake", func() {
 		It("is ready as soon as the handshake completes, without waiting on progress", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry})
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry()})
 			Expect(manager.Start(ctx)).To(Succeed())
 
 			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
@@ -139,13 +142,9 @@ var _ = Describe("Manager", func() {
 
 	When("a language server's readiness is progress but it opens no token", func() {
 		It("becomes ready once the debounce window elapses", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath, // no -progress flag: this server never reports
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
+			// No -progress flag: this server never reports any progress.
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{indexingFakeEntry()},
 				lsp.WithProgressDebounce(50*time.Millisecond))
 			Expect(manager.Start(ctx)).To(Succeed())
 
@@ -159,13 +158,7 @@ var _ = Describe("Manager", func() {
 	When("a language-server subprocess exits and Waythrough did not request its shutdown", func() {
 		It("starts a new subprocess, which becomes ready on its own", func() {
 			marker := filepath.Join(GinkgoT().TempDir(), "crashed-once")
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-crash-marker=" + marker},
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
+			entry := fakeEntry("-crash-marker=" + marker)
 
 			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
 				lsp.WithRestartLimit(3, time.Minute))
@@ -180,14 +173,8 @@ var _ = Describe("Manager", func() {
 
 	When("a language server exits more times than the restart limit allows", func() {
 		It("stops restarting it and reports it failed", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-crash"},
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry("-crash")},
 				lsp.WithRestartLimit(3, time.Minute))
 			Expect(manager.Start(ctx)).To(Succeed())
 
@@ -202,14 +189,8 @@ var _ = Describe("Manager", func() {
 
 	Describe("Shutdown", func() {
 		It("sends shutdown and exit, then waits for the server to exit on its own", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry()},
 				lsp.WithShutdownGrace(2*time.Second))
 			Expect(manager.Start(ctx)).To(Succeed())
 			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
@@ -225,15 +206,8 @@ var _ = Describe("Manager", func() {
 		})
 
 		It("kills a server that never acts on exit, instead of hanging forever", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-ignore-exit"},
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry("-ignore-exit")},
 				lsp.WithShutdownGrace(100*time.Millisecond))
 			Expect(manager.Start(ctx)).To(Succeed())
 			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
@@ -249,11 +223,8 @@ var _ = Describe("Manager", func() {
 		})
 
 		It("does not panic when shutting down a server that never spawned a process", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   filepath.Join(GinkgoT().TempDir(), "no-such-binary"),
-				Filetypes: map[string]string{".fake": "fake"},
-			}
+			entry := fakeEntry()
+			entry.Command = filepath.Join(GinkgoT().TempDir(), "no-such-binary")
 
 			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
 				lsp.WithRestartLimit(0, time.Minute))

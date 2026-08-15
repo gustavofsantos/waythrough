@@ -125,9 +125,9 @@ type document struct {
 	File string `json:"file" jsonschema:"file path, absolute or relative to the project root"`
 }
 
-// languageServer names a whole language server, the subject of a tool that
+// restartTarget names a whole language server, the subject of a tool that
 // acts on one rather than on a file or a position in a file.
-type languageServer struct {
+type restartTarget struct {
 	Name string `json:"server" jsonschema:"the configured name of the language server"`
 }
 
@@ -253,7 +253,7 @@ func (e *editor) getDiagnostics(
 // once the replacement has passed its own readiness gate, so the next tool
 // call reaches a server that can answer rather than one still starting.
 func (e *editor) restartServer(
-	ctx context.Context, _ *mcp.CallToolRequest, in languageServer,
+	ctx context.Context, _ *mcp.CallToolRequest, in restartTarget,
 ) (*mcp.CallToolResult, restartOutput, error) {
 	if in.Name == "" {
 		return nil, restartOutput{}, fmt.Errorf("server must name a configured language server")

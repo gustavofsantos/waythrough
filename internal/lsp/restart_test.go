@@ -99,14 +99,8 @@ var _ = Describe("Restart", func() {
 			// The fake crashes on its first run only, so the restart faces a
 			// server that can work and had simply stopped being tried.
 			marker := filepath.Join(GinkgoT().TempDir(), "crashed-once")
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-crash-marker=" + marker},
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-			manager := lsp.NewManager(root, []config.LanguageServer{entry},
+			manager := lsp.NewManager(root,
+				[]config.LanguageServer{fakeEntry("-crash-marker=" + marker)},
 				lsp.WithRestartLimit(0, time.Minute))
 			Expect(manager.Start(ctx)).To(Succeed())
 
@@ -124,13 +118,8 @@ var _ = Describe("Restart", func() {
 
 	When("an agent restarts a server again and again", func() {
 		It("serves again after each one, however many the agent asks for", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry})
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry()})
 			Expect(manager.Start(ctx)).To(Succeed())
 			Expect(manager.WaitReady(ctx, "fake", 5*time.Second)).To(Succeed())
 
@@ -148,14 +137,8 @@ var _ = Describe("Restart", func() {
 			// A budget of one exit is the smallest that can tell the two
 			// readings apart: one crash must be survivable, and a restart
 			// that had spent the budget would leave no room for it.
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-instance-log=" + instanceLog},
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry("-instance-log=" + instanceLog)},
 				lsp.WithRestartLimit(1, time.Minute))
 			Expect(manager.Start(ctx)).To(Succeed())
 			Expect(manager.WaitReady(ctx, "fake", 5*time.Second)).To(Succeed())
@@ -188,14 +171,10 @@ var _ = Describe("Restart", func() {
 
 			// The fake never acts on exit, so the restart's stop lasts the
 			// whole grace, and the shutdown below lands inside it.
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-ignore-exit", "-instance-log=" + instanceLog},
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{
+					fakeEntry("-ignore-exit", "-instance-log="+instanceLog),
+				},
 				lsp.WithShutdownGrace(300*time.Millisecond))
 			Expect(manager.Start(ctx)).To(Succeed())
 			Expect(manager.WaitReady(ctx, "fake", 5*time.Second)).To(Succeed())
@@ -231,13 +210,8 @@ var _ = Describe("Restart", func() {
 
 	When("the named server is not configured", func() {
 		It("names the servers that are, so the next call can name one of them", func() {
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Readiness: config.ReadinessHandshake,
-				Filetypes: map[string]string{".fake": "fake"},
-			}
-			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry})
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry()})
 			Expect(manager.Start(ctx)).To(Succeed())
 
 			err := manager.Restart(ctx, "gopls")
@@ -250,12 +224,7 @@ var _ = Describe("Restart", func() {
 		It("returns only after the replacement passes its own readiness gate", func() {
 			const indexing = 300 * time.Millisecond
 
-			entry := config.LanguageServer{
-				Name:      "fake",
-				Command:   fakelspPath,
-				Args:      []string{"-progress", "-progress-delay=" + indexing.String()},
-				Filetypes: map[string]string{".fake": "fake"},
-			}
+			entry := indexingFakeEntry("-progress", "-progress-delay="+indexing.String())
 			manager := lsp.NewManager(GinkgoT().TempDir(), []config.LanguageServer{entry},
 				lsp.WithProgressDebounce(20*time.Millisecond))
 			Expect(manager.Start(ctx)).To(Succeed())
