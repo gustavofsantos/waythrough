@@ -2,6 +2,9 @@ package lsp
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -41,6 +44,75 @@ func retiredAndCurrent(proc *serverProcess) (int, int) {
 	Expect(proc.snapshot().status).To(Equal(StatusStarting))
 	return retired, current
 }
+
+// survivalMarker is how long a spawned process waits before it leaves its
+// trace. A process that is stopped never reaches the trace, so its absence
+// is the reading that says the spawn left nothing running.
+const survivalMarker = 300 * time.Millisecond
+
+// tracingServer is a command that leaves a file behind, but only if it is
+// still running when survivalMarker elapses. A spec cannot read the pid of
+// a process that may be stopped before it even runs, so it asks the process
+// to report its own survival instead.
+func tracingServer(markerPath string) config.LanguageServer {
+	return config.LanguageServer{
+		Name:    "tracing",
+		Command: "sh",
+		Args: []string{
+			"-c",
+			"sleep " + strconv.FormatFloat(survivalMarker.Seconds(), 'f', -1, 64) +
+				"; touch " + markerPath,
+		},
+	}
+}
+
+func markerExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// A shutdown reads the process to stop in the same lock hold that raises
+// its flag, and an attempt raises its own claim to spawn in one lock hold
+// too. Whichever hold comes first, the pair below covers both orders: a
+// shutdown that arrives first stops any later attempt from starting, and
+// one that arrives second meets an attempt that ends its own process.
+// Neither order can leave a subprocess running after the shutdown returns.
+var _ = Describe("an attempt that races the shutdown of its server", func() {
+	It("starts no further attempt once the shutdown has begun", func() {
+		proc := newAttemptTracker(config.ReadinessHandshake)
+
+		_, spawning := proc.beginAttempt()
+		Expect(spawning).To(BeTrue())
+
+		proc.shutdown(context.Background(), time.Second)
+
+		_, spawning = proc.beginAttempt()
+		Expect(spawning).To(BeFalse(),
+			"a shutdown has already looked for the last process it must stop")
+	})
+
+	It("ends the process it spawned when the shutdown looked before it published", func() {
+		marker := filepath.Join(GinkgoT().TempDir(), "survived")
+		proc := newAttemptTracker(config.ReadinessHandshake)
+		proc.entry = tracingServer(marker)
+
+		generation, spawning := proc.beginAttempt()
+		Expect(spawning).To(BeTrue())
+
+		// The shutdown runs while this attempt is between its claim to spawn
+		// and the moment it publishes a process, so it finds nothing to stop.
+		proc.shutdown(context.Background(), time.Second)
+
+		err := proc.startProcess(context.Background(), generation)
+		Expect(err).To(MatchError(errShutdownBegan))
+		Expect(proc.currentServer()).To(BeNil(),
+			"a connection published here would name a process nobody owns")
+
+		Consistently(markerExists).WithArguments(marker).
+			WithTimeout(3*survivalMarker).Should(BeFalse(),
+			"the spawn no one could see must have ended the process it started")
+	})
+})
 
 var _ = Describe("a readiness signal from an attempt that was replaced", func() {
 	It("cannot report the replacement ready before the replacement says so", func() {
