@@ -1,0 +1,53 @@
+version: 2
+
+project_name: waythrough
+
+builds:
+  - id: waythrough
+    main: ./cmd/waythrough
+    binary: waythrough
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/gustavofsantos/waythrough/internal/cli.version={{ .Version }}
+
+archives:
+  - id: waythrough
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - name: waythrough
+    homepage: https://github.com/gustavofsantos/waythrough
+    description: MCP server that connects coding agents to LSP servers
+    repository:
+      owner: gustavofsantos
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaser-bot
+      email: actions@github.com
+    directory: Formula
+    test: |
+      assert_match "waythrough version #{version}", shell_output("#{bin}/waythrough --version")
+    install: |
+      bin.install "waythrough"

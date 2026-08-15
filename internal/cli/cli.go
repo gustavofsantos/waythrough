@@ -19,7 +19,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	root.SilenceErrors = true
 
 	if err := root.Execute(); err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
 	return 0
@@ -33,8 +33,9 @@ func configFlag(cmd *cobra.Command, verb string) *string {
 
 func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "waythrough",
-		Short: "Waythrough manages configured LSP servers for coding agents",
+		Use:     "waythrough",
+		Short:   "Waythrough manages configured LSP servers for coding agents",
+		Version: version,
 	}
 
 	root.AddCommand(newInitCommand())
