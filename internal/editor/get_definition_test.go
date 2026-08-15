@@ -146,6 +146,20 @@ var _ = Describe("get_definition", func() {
 		})
 	})
 
+	When("the column is less than 1", func() {
+		It("returns a tool error stating that line and column are 1-based", func() {
+			Expect(os.WriteFile(filepath.Join(root, "main.fake"), []byte("hello"), 0o644)).To(Succeed())
+
+			cfg := fakeConfig()
+			manager := lsp.NewManager(root, cfg.LanguageServers)
+			session := connect(ctx, manager, cfg)
+
+			result := callTool(ctx, session, "get_definition", "main.fake", 1, 0)
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring("1-based"))
+		})
+	})
+
 	When("the file's extension has no configured language server", func() {
 		It("returns a tool error naming the extension", func() {
 			cfg := fakeConfig()
