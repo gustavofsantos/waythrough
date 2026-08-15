@@ -54,6 +54,15 @@ var _ = Describe("Manager", func() {
 		cancel()
 	})
 
+	When("the named server is not configured", func() {
+		It("returns an error naming it", func() {
+			manager := lsp.NewManager(GinkgoT().TempDir(), nil)
+
+			_, err := manager.Status("missing")
+			Expect(err).To(MatchError(ContainSubstring(`"missing"`)))
+		})
+	})
+
 	When("a language server reports workDoneProgress for its startup work", func() {
 		It("blocks WaitReady until the progress token closes, then returns", func() {
 			entry := config.LanguageServer{
