@@ -1,0 +1,1 @@
+write a project-local claude rule that instructs claude to use the waythrough mcp server tools instead of navigating on files without language enhanced funcionality
