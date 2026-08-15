@@ -1,0 +1,1 @@
+lets work on the issue 2026-08-15-restart-a-language-server-on-request. commits on main branch are allowed
