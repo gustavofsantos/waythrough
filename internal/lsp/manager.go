@@ -96,9 +96,9 @@ func WithProgressDebounce(d time.Duration) Option {
 
 // WithRestartLimit overrides how many times a server may exit within
 // window before Waythrough stops restarting it and marks it failed.
-func WithRestartLimit(max int, window time.Duration) Option {
+func WithRestartLimit(limit int, window time.Duration) Option {
 	return func(m *Manager) {
-		m.restartLimit = max
+		m.restartLimit = limit
 		m.restartWindow = window
 	}
 }
