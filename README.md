@@ -1,16 +1,20 @@
 # Waythrough
 
-A coding agent without a language server guesses at your code. It reads
-text and looks for matching names. It does not know a symbol's
-definition, and it does not know every place that uses it.
+Coding agents are great at reading code. Navigating an unfamiliar
+codebase is harder: without language tooling, an agent has to search
+for matching text and guess which definition or reference actually
+matters.
 
-Waythrough closes that gap. Waythrough is a Model Context Protocol
-(MCP) server. It starts and manages Language Server Protocol (LSP)
-servers. It offers their features to the agent as MCP tools.
+Waythrough gives your agent a map. It runs your project's Language
+Server Protocol (LSP) servers and exposes their code intelligence
+through the Model Context Protocol (MCP). That means agents such as
+Claude Code, Codex, and Antigravity can jump to definitions, find
+references, inspect diagnostics, and safely plan renames—the same
+kind of help you expect from a modern editor.
 
-Point a coding agent at Waythrough. Claude Code, Codex, and
-Antigravity are coding agents. Waythrough gives the agent the same
-"go to definition" and "find references" power as a modern editor.
+Instead of making your agent piece the codebase together one text
+search at a time, let it ask the tools that already understand your
+code.
 
 ## Status
 
