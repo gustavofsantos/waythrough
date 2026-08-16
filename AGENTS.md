@@ -25,6 +25,16 @@ Choose the simplest design that improves all three. Do the necessary design thin
 - Consider network, disk, memory, and CPU cost during design. Estimate bandwidth and latency before optimizing; batch work to amortize expensive operations.
 - Minimize dependencies and tooling. Add one only when its continuing cost is justified by a clear, material benefit.
 
+## Go navigation
+
+When working with `*.go` files, use the Waythrough tools for semantic navigation:
+
+- **Where is this symbol defined?** Use `get_definition`.
+- **Which code uses this symbol?** Use `list_references`.
+- **Which edits does a rename need?** Use `rename_symbol`.
+
+A text search finds names, not meaning. Use text search and the Waythrough tools for the questions each answers best.
+
 ## Change checklist
 
 Before completing a non-trivial change, use the `critical-systems-design` skill. For changes on correctness-critical, resource-sensitive, or hot paths, also ask the appropriate specialist reviewer subagent for a focused review.
