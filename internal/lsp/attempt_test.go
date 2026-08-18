@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,14 +23,9 @@ import (
 // through a real subprocess, because a message written before a process
 // exits is always read before that exit is seen.
 func newAttemptTracker(readiness config.Readiness) *serverProcess {
-	return &serverProcess{
-		entry:      config.LanguageServer{Name: "fake", Readiness: readiness},
-		readyCh:    make(chan struct{}),
-		retiredCh:  make(chan struct{}),
-		exitedCh:   make(chan struct{}),
-		restartCh:  make(chan struct{}, 1),
-		stoppingCh: make(chan struct{}),
-	}
+	return newServerProcess(
+		config.LanguageServer{Name: "fake", Readiness: readiness},
+		slog.New(slog.DiscardHandler))
 }
 
 // retiredAndCurrent runs two attempts and names them, leaving the server on

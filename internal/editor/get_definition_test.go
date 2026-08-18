@@ -3,6 +3,7 @@ package editor_test
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -27,13 +28,27 @@ type toolOutput struct {
 	Locations []toolLocation `json:"locations"`
 }
 
+// discardLogger is the logger a spec passes when it is not asserting on
+// logs: editor.New requires one, and records nothing through this.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.DiscardHandler)
+}
+
 // connect starts manager, builds the editor MCP server on top of it, and
 // connects a client to it over an in-memory transport — a real MCP session,
 // with no subprocess or stdio involved on the client/server wire.
 func connect(ctx context.Context, manager *lsp.Manager, cfg config.Config) *mcp.ClientSession {
+	return connectLogging(ctx, manager, cfg, discardLogger())
+}
+
+// connectLogging is connect for the specs that assert on what the session
+// recorded, rather than on what it answered.
+func connectLogging(
+	ctx context.Context, manager *lsp.Manager, cfg config.Config, logger *slog.Logger,
+) *mcp.ClientSession {
 	Expect(manager.Start(ctx)).To(Succeed())
 
-	server := editor.New(manager, cfg)
+	server := editor.New(manager, cfg, logger)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 
 	_, err := server.Connect(ctx, serverTransport, nil)

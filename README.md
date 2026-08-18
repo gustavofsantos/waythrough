@@ -97,6 +97,51 @@ Waythrough exposes these MCP tools to a connected coding agent:
   longer match the code on disk. Waythrough cannot see that a
   server answers from a stale index, so your agent must decide.
 
+## See what it is doing
+
+`serve` is quiet by default: it says nothing on its own, because
+stdout carries the MCP protocol frames and stderr belongs to whatever
+your coding agent chooses to show you.
+
+Pass `--debug` when you want to know whether Waythrough is earning
+its place in your agent's tool list:
+
+```json
+{
+  "mcpServers": {
+    "waythrough": {
+      "command": "waythrough",
+      "args": [
+        "serve", "--config", "/absolute/path/to/waythrough.yaml", "--debug"
+      ]
+    }
+  }
+}
+```
+
+Every record goes to stderr, never to stdout, and covers three
+things:
+
+- **Every MCP request.** Which tool your agent called, the arguments
+  it sent, how long the answer took, and what came back. A tool that
+  answers with nothing and a tool that answers with twelve locations
+  are the two cases worth telling apart, so the answer itself is
+  recorded, capped at 2 KB per record.
+- **Every language server's lifecycle.** Starting, ready, exited,
+  restarted, and gave up. This is usually why a tool call reports a
+  server still starting.
+- **Every language server's own stderr.** A server that will not
+  start explains itself there and nowhere else. Waythrough discards
+  that stream without `--debug`.
+
+The records name file paths and carry tool results, which include
+your source code for a rename. They go to your terminal and nowhere
+else, but that is the reason `--debug` is a flag rather than the
+default.
+
+Coding agents differ in where they put an MCP server's stderr. Check
+your agent's MCP logs for it.
+
 ## Learn more
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — set up your tools, run the
