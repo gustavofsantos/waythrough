@@ -113,6 +113,12 @@ Both the tool answers and the stderr lines are capped, because
 neither a language server's output nor an agent's arguments have a
 size Waythrough controls.
 
+Waythrough writes the records to stderr and offers no way to write
+them anywhere else. A `--log-file` flag was considered and rejected:
+it would be a second way to do what a shell redirect already does,
+and two ways to reach one behaviour is one way too many. README.md
+shows the redirect.
+
 ## Add a language server
 
 Add an entry to `waythrough.yaml`. You need no code change. See the
