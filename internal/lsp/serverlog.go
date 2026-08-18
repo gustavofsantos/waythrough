@@ -6,11 +6,11 @@ import (
 	"unicode/utf8"
 )
 
-// serverLogLineBytesMax bounds what one log record carries of a language
-// server's stderr. A server that writes a very long line, or no newline at
-// all, is split across records at this boundary rather than buffered
-// without limit: stderr is the server's to fill, so nothing about its
-// volume may be left to the server to decide.
+// serverLogLineBytesMax bounds both what one log record carries of a
+// language server's stderr and what serverLog holds between writes. A line
+// longer than this is split across records, whether or not the server ever
+// ends it: stderr is the server's to fill, so nothing about its volume may
+// be left to the server to decide.
 const serverLogLineBytesMax = 4096
 
 // serverLog turns a language server's stderr into one log record per line.
@@ -33,33 +33,56 @@ func newServerLog(logger *slog.Logger, name string) *serverLog {
 	return &serverLog{logger: logger.With(slog.String("server", name))}
 }
 
-// Write splits p into lines and logs each one. It always reports every byte
-// written, as io.Writer requires and as the exec copy goroutine checks.
+// Write splits p into lines and logs each one, emitting whenever a line
+// ends or reaches serverLogLineBytesMax, whichever comes first. It always
+// reports every byte written, as io.Writer requires and as the exec copy
+// goroutine checks.
 func (l *serverLog) Write(p []byte) (int, error) {
 	written := len(p)
 
-	for {
+	for len(p) > 0 {
 		newline := bytes.IndexByte(p, '\n')
 		if newline < 0 {
+			l.appendCapped(p)
 			break
 		}
-		l.pending = append(l.pending, p[:newline]...)
+
+		l.appendCapped(p[:newline])
+		// pending is empty here only for a line the server left blank,
+		// because appendCapped emits a full record only when more of the
+		// line is still to come. A blank line stays one record, so the log
+		// keeps line-for-line correspondence with the server's stderr.
 		l.emit(l.pending, false)
 		l.pending = l.pending[:0]
 		p = p[newline+1:]
 	}
-	l.pending = append(l.pending, p...)
-
-	// Everything past the cap is emitted as its own record, so a server
-	// that never writes a newline cannot grow pending without limit.
-	for len(l.pending) >= serverLogLineBytesMax {
-		l.emit(l.pending[:serverLogLineBytesMax], true)
-		// Copying the remainder to the front keeps pending's capacity from
-		// growing with the length of one unbroken line.
-		l.pending = append(l.pending[:0], l.pending[serverLogLineBytesMax:]...)
-	}
 
 	return written, nil
+}
+
+// appendCapped adds one line, or one piece of a line, to pending, emitting
+// a record each time pending fills. It leaves pending no longer than
+// serverLogLineBytesMax and copies no more than that in one step, so
+// neither the size of a record nor the memory held between writes is the
+// language server's to choose.
+//
+// It emits only when bytes of the same line still follow, so a line that
+// ends exactly at the cap is reported as the whole line it is.
+//
+// The loop terminates because every pass either empties pending, which
+// makes room for a whole cap, or takes at least one byte from segment.
+func (l *serverLog) appendCapped(segment []byte) {
+	for len(segment) > 0 {
+		if len(l.pending) == serverLogLineBytesMax {
+			l.emit(l.pending, true)
+			l.pending = l.pending[:0]
+		}
+
+		room := serverLogLineBytesMax - len(l.pending)
+		take := min(room, len(segment))
+		l.pending = append(l.pending, segment[:take]...)
+		segment = segment[take:]
+	}
 }
 
 // flush logs whatever the server wrote after its last newline. A server
@@ -73,9 +96,9 @@ func (l *serverLog) flush() {
 	l.pending = l.pending[:0]
 }
 
-// emit logs one line. truncated separates a line the server ended from one
-// serverLogLineBytesMax ended, so a reader is never left to guess which.
-// It does not clear pending, because one caller emits only a prefix of it.
+// emit logs one record. truncated says this record was cut at the cap and
+// the rest of the same line follows in the next one, so a reader never has
+// to guess whether a line ended where the record did.
 func (l *serverLog) emit(line []byte, truncated bool) {
 	l.logger.Debug("language server stderr",
 		slog.String("line", string(bytes.TrimSuffix(line, []byte("\r")))),

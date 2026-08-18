@@ -97,13 +97,61 @@ var _ = Describe("a language server's stderr", func() {
 			"what is held is the remainder alone, never the whole line")
 	})
 
-	It("holds less than one cap between writes, however large each write is", func() {
+	// A line that ends is the ordinary case, and it reaches the cap by a
+	// different path than a line that never does. Holding one whole record
+	// per line would have let a server that writes a long line — a stack
+	// trace, a JSON blob — set the size of both the record and the buffer.
+	It("cuts an over-long line that does end, by the same cap", func() {
+		log, recorded := recordingLog()
+		line := strings.Repeat("z", serverLogLineBytesMax*2+7) + "\n"
+
+		written, err := log.Write([]byte(line))
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(written).To(Equal(len(line)))
+		Expect(strings.Count(recorded.String(), "truncated=true")).To(Equal(2))
+		Expect(strings.Count(recorded.String(), "truncated=false")).To(Equal(1),
+			"the tail of the line closes it, and was not cut by the cap")
+		Expect(log.pending).To(BeEmpty(), "the line ended, so nothing is held")
+	})
+
+	It("reports a line that ends exactly at the cap as the whole line it is", func() {
+		log, recorded := recordingLog()
+
+		_, err := log.Write([]byte(strings.Repeat("w", serverLogLineBytesMax) + "\n"))
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Count(recorded.String(), "language server stderr")).To(Equal(1))
+		Expect(recorded.String()).To(ContainSubstring("truncated=false"),
+			"nothing was lost, so nothing should claim it was")
+	})
+
+	// One line arriving in many writes must be capped by its own length,
+	// not by how the operating system happened to chunk it.
+	It("holds no more than one cap however a long line is split across writes", func() {
+		log, _ := recordingLog()
+
+		for range 6 {
+			_, err := log.Write([]byte(strings.Repeat("q", serverLogLineBytesMax/2)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(log.pending)).To(BeNumerically("<=", serverLogLineBytesMax))
+		}
+
+		_, err := log.Write([]byte("\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(log.pending).To(BeEmpty())
+	})
+
+	// One cap, not less: a full cap is held rather than emitted until more
+	// of the same line arrives, which is what lets a line ending exactly at
+	// the cap be reported as whole instead of as cut.
+	It("holds no more than one cap between writes, however large each write is", func() {
 		log, recorded := recordingLog()
 
 		for range 8 {
 			_, err := log.Write([]byte(strings.Repeat("y", serverLogLineBytesMax)))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(len(log.pending)).To(BeNumerically("<", serverLogLineBytesMax))
+			Expect(len(log.pending)).To(BeNumerically("<=", serverLogLineBytesMax))
 		}
 
 		Expect(recorded.String()).To(ContainSubstring("truncated=true"))
