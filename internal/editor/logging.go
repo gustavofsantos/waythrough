@@ -139,26 +139,39 @@ func describeAnswer(result mcp.Result, err error) []any {
 	}
 }
 
-// contentText joins the text a tool answered with. Waythrough's tools all
-// answer with structured output, which the SDK renders into one text block,
-// so this is that block for every tool here and the empty string for a
-// content kind none of them produce.
+// contentText joins the text a tool answered with, reading no more than one
+// byte past the record cap. Waythrough's tools all answer with structured
+// output, which the SDK renders into one text block, and that block is as
+// large as the language server's answer — so copying it whole only to
+// truncate it afterwards would be work spent on bytes no record can carry.
+//
+// The one byte past the cap is what lets truncateForLog tell a whole answer
+// from a cut one, so a cut is marked rather than silent.
 func contentText(result *mcp.CallToolResult) string {
+	const readBytesMax = toolResultBytesMax + 1
+
 	var joined strings.Builder
 	for _, content := range result.Content {
 		text, isText := content.(*mcp.TextContent)
 		if !isText {
 			continue
 		}
+
+		separator := ""
 		if joined.Len() > 0 {
-			joined.WriteByte(' ')
+			separator = " "
 		}
-		joined.WriteString(text.Text)
-		// The caller truncates, so reading past the cap only to discard it
-		// would be work spent on bytes no record will carry.
-		if joined.Len() >= toolResultBytesMax {
+		room := readBytesMax - joined.Len() - len(separator)
+		if room <= 0 {
 			break
 		}
+
+		joined.WriteString(separator)
+		if len(text.Text) > room {
+			joined.WriteString(text.Text[:room])
+			break
+		}
+		joined.WriteString(text.Text)
 	}
 	return joined.String()
 }
