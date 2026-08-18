@@ -8,6 +8,7 @@ package editor
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -18,10 +19,21 @@ import (
 
 // New builds the MCP server exposing editor operations backed by manager's
 // configured language servers, routed by each file's extension per cfg.
-func New(manager *lsp.Manager, cfg config.Config) *mcp.Server {
+//
+// logger records every request the server handles, at debug level. Pass
+// slog.New(slog.DiscardHandler) to record nothing.
+//
+// Precondition: logger is not nil, so no call site here has to guard a log
+// statement.
+func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Server {
+	if logger == nil {
+		panic("editor: New needs a logger, got nil")
+	}
+
 	e := &editor{manager: manager, serverForExt: routeByExtension(cfg)}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "waythrough", Version: "0.1.0"}, nil)
+	server.AddReceivingMiddleware(logMethodCalls(logger))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_definition",
 		Description: "Find where the symbol at a file position is defined.",

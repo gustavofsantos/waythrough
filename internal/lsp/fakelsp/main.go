@@ -55,6 +55,8 @@ var (
 	requestLog       = flag.String("request-log", "", "path to a file that receives the method name of every request and notification handled, one per line — lets a test assert Waythrough never sent a request at all, not merely that it disliked the answer")
 	syncLog          = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
 	instanceLog      = flag.String("instance-log", "", "path to a file that receives this process's pid on every process start, one per line — lets a restart test read that the old process ended and that a different one now serves, which no LSP message reports")
+	stderrLine       = flag.String("stderr-line", "", "text to write to this process's own stderr at startup, followed by a newline — lets a test assert Waythrough surfaces what a language server says about itself, which no LSP message carries")
+	stderrPartial    = flag.String("stderr-partial", "", "text to write to this process's own stderr at startup with no trailing newline — the tail a server that dies mid-sentence leaves behind")
 
 	openDocs       = map[string]bool{}
 	syncLogFile    *os.File
@@ -68,6 +70,16 @@ func main() {
 	// The pid is recorded before any flag can end this run, so the log
 	// counts every process start, including the ones that crash on purpose.
 	logInstance()
+
+	// Written before any flag can end this run, for the same reason: a
+	// server that crashes on purpose is exactly the one whose stderr a
+	// test wants to read.
+	if *stderrLine != "" {
+		fmt.Fprintln(os.Stderr, *stderrLine)
+	}
+	if *stderrPartial != "" {
+		fmt.Fprint(os.Stderr, *stderrPartial)
+	}
 
 	if *crash {
 		os.Exit(1)

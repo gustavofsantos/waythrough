@@ -82,6 +82,43 @@ received, so no single tool call can end a language server when
 that call returns. And a restart of a server that gave up needs no
 new goroutine.
 
+## Debug logging
+
+`serve --debug` builds one `*slog.Logger` in `internal/cli/debug.go`
+and hands it to both `internal/lsp` and `internal/editor`. Without
+the flag, that constructor returns a logger over `slog.DiscardHandler`
+instead, and every component checks `Enabled` before doing work only
+a record would use.
+
+The logger writes to the command's stderr and is refused outright if
+handed `os.Stdout`. `serve` speaks MCP over stdio, so stdout carries
+JSON-RPC frames and nothing else; one log byte written there
+desynchronizes the framing and the session is lost. That is a
+programmer mistake rather than a runtime failure, so
+`internal/cli/debug.go` panics rather than returning an error.
+
+Three sources feed it:
+
+- `internal/editor/logging.go` installs MCP receiving middleware that
+  records each request, its arguments, its duration, and its answer.
+  It returns the wrapped handler's result and error untouched.
+- `internal/lsp/manager.go` records each server's lifecycle
+  transitions.
+- `internal/lsp/serverlog.go` turns a language server's own stderr
+  into one record per line. Waythrough sets `cmd.Stderr` to
+  `io.Discard` when debug logging is off, so a server's output costs
+  nothing to ignore.
+
+Both the tool answers and the stderr lines are capped, because
+neither a language server's output nor an agent's arguments have a
+size Waythrough controls.
+
+Waythrough writes the records to stderr and offers no way to write
+them anywhere else. A `--log-file` flag was considered and rejected:
+it would be a second way to do what a shell redirect already does,
+and two ways to reach one behaviour is one way too many. README.md
+shows the redirect.
+
 ## Add a language server
 
 Add an entry to `waythrough.yaml`. You need no code change. See the

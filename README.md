@@ -97,6 +97,90 @@ Waythrough exposes these MCP tools to a connected coding agent:
   longer match the code on disk. Waythrough cannot see that a
   server answers from a stale index, so your agent must decide.
 
+## See what it is doing
+
+`serve` is quiet by default: it says nothing on its own, because
+stdout carries the MCP protocol frames and stderr belongs to whatever
+your coding agent chooses to show you.
+
+Pass `--debug` when you want to know whether Waythrough is earning
+its place in your agent's tool list:
+
+```json
+{
+  "mcpServers": {
+    "waythrough": {
+      "command": "waythrough",
+      "args": [
+        "serve", "--config", "/absolute/path/to/waythrough.yaml", "--debug"
+      ]
+    }
+  }
+}
+```
+
+Every record goes to stderr, never to stdout, and covers three
+things:
+
+- **Every MCP request.** Which tool your agent called, the arguments
+  it sent, how long the answer took, and what came back. A tool that
+  answers with nothing and a tool that answers with twelve locations
+  are the two cases worth telling apart, so the answer itself is
+  recorded, capped at 2 KB per record.
+- **Every language server's lifecycle.** Starting, ready, exited,
+  restarted, and gave up. This is usually why a tool call reports a
+  server still starting.
+- **Every language server's own stderr.** A server that will not
+  start explains itself there and nowhere else. Waythrough discards
+  that stream without `--debug`.
+
+The records name file paths and carry tool results, which include
+your source code for a rename. They go wherever you send stderr and
+nowhere else, but that is the reason `--debug` is a flag rather than
+the default.
+
+### Read the records
+
+Waythrough writes to stderr and does nothing else with it. It has no
+log file of its own, because a stream is already the thing your shell
+knows how to put wherever you want it.
+
+Your agent starts Waythrough, so redirect stderr where the agent
+starts it. An `args` array holds no redirect, so make the command a
+shell:
+
+```json
+{
+  "mcpServers": {
+    "waythrough": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "exec waythrough serve --config /absolute/path/to/waythrough.yaml --debug 2>>/tmp/waythrough-debug.log"
+      ]
+    }
+  }
+}
+```
+
+Then read it as it fills:
+
+```sh
+tail -f /tmp/waythrough-debug.log
+```
+
+Two details make this safe. `exec` replaces the shell with
+Waythrough rather than leaving one wrapped around it, so your agent
+talks to Waythrough directly and a signal reaches the right process.
+`2>>` moves stderr alone, so stdout still carries the protocol
+frames, and appending keeps the log across restarts.
+
+Your agent may already keep this for you. Claude Code, for one,
+writes each MCP server's output under
+`~/.cache/claude-cli-nodejs/<project>/mcp-logs-waythrough/` on Linux,
+and under `~/Library/Caches/` in place of `~/.cache/` on macOS. Look
+there first: if you find the records, you need no redirect at all.
+
 ## Learn more
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — set up your tools, run the

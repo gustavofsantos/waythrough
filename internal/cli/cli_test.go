@@ -187,3 +187,32 @@ language_servers:
 		})
 	})
 })
+
+var _ = Describe("serve --debug", func() {
+	var (
+		configPath string
+		stderr     *bytes.Buffer
+	)
+
+	BeforeEach(func() {
+		configPath = filepath.Join(GinkgoT().TempDir(), "waythrough.yaml")
+		stderr = &bytes.Buffer{}
+	})
+
+	// serve on a config it accepts blocks on the test binary's own stdin,
+	// so a config it must reject is the one way to run the flag through
+	// cobra and see that the command still refuses for the right reason.
+	When("the config claims one extension twice", func() {
+		BeforeEach(func() { writeConfigFile(configPath, twoServersOneExtension) })
+
+		It("accepts the flag and still refuses to start", func() {
+			code := cli.Execute(
+				[]string{"serve", "--config", configPath, "--debug"},
+				&bytes.Buffer{}, stderr)
+
+			Expect(code).NotTo(Equal(0))
+			Expect(stderr.String()).To(ContainSubstring("already claimed"))
+			Expect(stderr.String()).NotTo(ContainSubstring("unknown flag"))
+		})
+	})
+})

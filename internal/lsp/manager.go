@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +57,7 @@ const (
 // tracks when each one is ready to answer a request.
 type Manager struct {
 	root             string
+	logger           *slog.Logger
 	progressDebounce time.Duration
 	restartLimit     int
 	restartWindow    time.Duration
@@ -157,6 +159,22 @@ func WithToolCallTimeout(d time.Duration) Option {
 	return func(m *Manager) { m.toolCallTimeout = d }
 }
 
+// WithLogger routes this Manager's lifecycle records, and the stderr of
+// every language server it starts, to logger. Both are written at debug
+// level, so a logger with no debug handler — the default — leaves a
+// server's stderr discarded exactly as it was before.
+//
+// Precondition: logger is not nil. A Manager always holds a logger it can
+// call, so nothing here has to guard a log statement.
+func WithLogger(logger *slog.Logger) Option {
+	return func(m *Manager) {
+		if logger == nil {
+			panic("lsp: WithLogger needs a logger, got nil")
+		}
+		m.logger = logger
+	}
+}
+
 // NewManager builds a Manager for entries. root is the project directory
 // passed to each language server as its workspace root.
 //
@@ -167,6 +185,7 @@ func WithToolCallTimeout(d time.Duration) Option {
 func NewManager(root string, entries []config.LanguageServer, opts ...Option) *Manager {
 	m := &Manager{
 		root:             root,
+		logger:           slog.New(slog.DiscardHandler),
 		progressDebounce: defaultProgressDebounce,
 		restartLimit:     defaultRestartLimit,
 		restartWindow:    defaultRestartWindow,
@@ -178,16 +197,31 @@ func NewManager(root string, entries []config.LanguageServer, opts ...Option) *M
 		opt(m)
 	}
 	for _, entry := range entries {
-		m.procs[entry.Name] = &serverProcess{
-			entry:      entry,
-			readyCh:    make(chan struct{}),
-			retiredCh:  make(chan struct{}),
-			exitedCh:   make(chan struct{}),
-			restartCh:  make(chan struct{}, 1),
-			stoppingCh: make(chan struct{}),
-		}
+		m.procs[entry.Name] = newServerProcess(entry, m.logger)
 	}
 	return m
+}
+
+// newServerProcess builds the tracking state for one configured language
+// server, before any attempt to spawn it.
+//
+// It exists so that no caller has to remember the logger: a serverProcess
+// records its own lifecycle, so one built without a logger would nil-panic
+// on the first transition it made rather than at the point of the mistake.
+func newServerProcess(entry config.LanguageServer, logger *slog.Logger) *serverProcess {
+	if logger == nil {
+		panic("lsp: newServerProcess needs a logger, got nil")
+	}
+
+	return &serverProcess{
+		entry:      entry,
+		logger:     logger,
+		readyCh:    make(chan struct{}),
+		retiredCh:  make(chan struct{}),
+		exitedCh:   make(chan struct{}),
+		restartCh:  make(chan struct{}, 1),
+		stoppingCh: make(chan struct{}),
+	}
 }
 
 // Start spawns a subprocess for every configured entry and begins the
@@ -231,11 +265,33 @@ func (m *Manager) runServer(ctx context.Context, proc *serverProcess) {
 			return
 		}
 
-		if err := proc.startProcess(ctx, generation); err == nil {
-			if err := proc.handshake(ctx, m.root); err == nil {
+		m.logger.Debug("language server starting",
+			slog.String("server", proc.entry.Name),
+			slog.String("command", proc.entry.Command),
+			slog.Any("args", proc.entry.Args),
+			slog.Int("attempt", generation))
+
+		// A start or handshake that fails is why a later tool call reports
+		// the server still starting, so it is recorded here rather than
+		// left for the caller of that tool to guess at.
+		if err := proc.startProcess(ctx, generation); err != nil {
+			m.logger.Warn("language server failed to start",
+				slog.String("server", proc.entry.Name),
+				slog.Int("attempt", generation),
+				slog.String("error", truncateForLog(err.Error())))
+		} else {
+			if err := proc.handshake(ctx, m.root); err != nil {
+				m.logger.Warn("language server handshake failed",
+					slog.String("server", proc.entry.Name),
+					slog.Int("attempt", generation),
+					slog.String("error", truncateForLog(err.Error())))
+			} else {
 				go proc.negotiateReadiness(ctx, m.progressDebounce, generation)
 			}
 			proc.wait()
+			m.logger.Debug("language server exited",
+				slog.String("server", proc.entry.Name),
+				slog.Int("attempt", generation))
 		}
 
 		if proc.shutdownRequested() {
@@ -314,6 +370,9 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	// names it, so a restart can neither stop the replacement it asked for
 	// nor mistake the retired attempt's readiness for the new one's.
 	retired := proc.snapshot().generation
+	m.logger.Debug("restarting language server",
+		slog.String("server", name),
+		slog.Int("retired_attempt", retired))
 	proc.requestRestart()
 	proc.stopAttempt(ctx, m.shutdownGrace, retired)
 	return m.waitReady(ctx, name, m.toolCallTimeout, retired)
@@ -846,6 +905,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 // belongs to one attempt, and beginAttempt replaces it.
 type serverProcess struct {
 	entry      config.LanguageServer
+	logger     *slog.Logger
 	restartCh  chan struct{}
 	stoppingCh chan struct{}
 
@@ -854,8 +914,11 @@ type serverProcess struct {
 	// retired attempt can still speak while its replacement starts, so
 	// every readiness signal carries the generation that produced it and
 	// the signals from an older one are dropped.
-	generation   int
-	cmd          *exec.Cmd
+	generation int
+	cmd        *exec.Cmd
+	// stderrLog is nil unless debug logging asked for this server's stderr.
+	// It belongs to the attempt that spawned it, and only wait may flush it.
+	stderrLog    *serverLog
 	server       protocol.Server
 	capabilities protocol.ServerCapabilities
 	status       Status
@@ -1076,6 +1139,7 @@ func (p *serverProcess) beginAttempt() (int, bool) {
 
 	p.generation++
 	p.cmd = nil
+	p.stderrLog = nil
 	p.readyCh = make(chan struct{})
 	p.retiredCh = make(chan struct{})
 	p.exitedCh = make(chan struct{})
@@ -1100,7 +1164,17 @@ func (p *serverProcess) beginAttempt() (int, bool) {
 // Go allows exactly one.
 func (p *serverProcess) startProcess(ctx context.Context, generation int) error {
 	cmd := exec.CommandContext(ctx, p.entry.Command, p.entry.Args...)
+
+	// A language server explains a bad start on its own stderr, and that is
+	// the one account of it Waythrough can offer. Capturing it costs a
+	// record per line, so only a debug logger opts in; every other run
+	// discards the stream as before.
+	var stderrLog *serverLog
 	cmd.Stderr = io.Discard
+	if p.logger.Enabled(ctx, slog.LevelDebug) {
+		stderrLog = newServerLog(p.logger, p.entry.Name)
+		cmd.Stderr = stderrLog
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -1121,6 +1195,7 @@ func (p *serverProcess) startProcess(ctx context.Context, generation int) error 
 	stopping := p.shuttingDown
 	if !stopping {
 		p.cmd = cmd
+		p.stderrLog = stderrLog
 		p.server = server
 	}
 	p.mu.Unlock()
@@ -1131,6 +1206,12 @@ func (p *serverProcess) startProcess(ctx context.Context, generation int) error 
 
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
+
+	// This attempt never published its process, so wait will not run for it
+	// and this is the only place its stderr can be flushed.
+	if stderrLog != nil {
+		stderrLog.flush()
+	}
 	return fmt.Errorf("start %s: %w", p.entry.Command, errShutdownBegan)
 }
 
@@ -1235,31 +1316,43 @@ func (p *serverProcess) tokenClosed(generation int, key string) {
 // replacement had indexed anything.
 func (p *serverProcess) markReady(generation int) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if generation != p.generation {
+	stale := generation != p.generation || p.status != StatusStarting
+	if !stale {
+		p.status = StatusReady
+		close(p.readyCh)
+	}
+	p.mu.Unlock()
+
+	// Logging outside the lock hold keeps a debug handler's write to stderr
+	// off the path every waiter and every tool call takes through p.mu.
+	if stale {
 		return
 	}
-	if p.status != StatusStarting {
-		return
-	}
-	p.status = StatusReady
-	close(p.readyCh)
+	p.logger.Debug("language server ready",
+		slog.String("server", p.entry.Name),
+		slog.Int("attempt", generation))
 }
 
 func (p *serverProcess) markFailed(generation int) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if generation != p.generation {
+	stale := generation != p.generation || p.status == StatusFailed
+	if !stale {
+		wasStarting := p.status == StatusStarting
+		p.status = StatusFailed
+		if wasStarting {
+			close(p.readyCh)
+		}
+	}
+	p.mu.Unlock()
+
+	if stale {
 		return
 	}
-	if p.status == StatusFailed {
-		return
-	}
-	wasStarting := p.status == StatusStarting
-	p.status = StatusFailed
-	if wasStarting {
-		close(p.readyCh)
-	}
+	// A server that has spent its crash budget answers nothing until
+	// something restarts it, so this is a warning rather than a trace.
+	p.logger.Warn("language server gave up after repeated exits",
+		slog.String("server", p.entry.Name),
+		slog.Int("attempt", generation))
 }
 
 func (p *serverProcess) snapshot() attemptState {
@@ -1278,12 +1371,20 @@ func (p *serverProcess) snapshot() attemptState {
 func (p *serverProcess) wait() {
 	p.mu.Lock()
 	cmd := p.cmd
+	stderrLog := p.stderrLog
 	exited := p.exitedCh
 	p.mu.Unlock()
 	if cmd == nil {
 		return
 	}
 	_ = cmd.Wait()
+
+	// Wait returns only once the goroutine copying this process's stderr
+	// has finished, so this flush is the sole remaining writer and the
+	// last partial line the server wrote is safe to read here.
+	if stderrLog != nil {
+		stderrLog.flush()
+	}
 	close(exited)
 }
 
