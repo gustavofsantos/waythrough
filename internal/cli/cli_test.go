@@ -84,6 +84,18 @@ var _ = Describe("waythrough CLI", func() {
 	})
 
 	Describe("validate", func() {
+		When("the file configures no language servers", func() {
+			BeforeEach(func() {
+				writeConfigFile(configPath, "language_servers: []\n")
+			})
+
+			It("exits non-zero and explains that the configuration is unusable", func() {
+				code := run("validate", "--config", configPath)
+				Expect(code).NotTo(Equal(0))
+				Expect(stderr.String()).To(ContainSubstring("no language servers"))
+			})
+		})
+
 		When("every entry has a name, a command, and a filetype mapping", func() {
 			BeforeEach(func() {
 				writeConfigFile(configPath, `
@@ -168,6 +180,18 @@ language_servers:
 	// reads the test binary's own stdin. What that returns depends on how
 	// the suite was started, so there is nothing stable to assert on.
 	Describe("serve", func() {
+		When("the repository file configures no language servers", func() {
+			BeforeEach(func() {
+				writeConfigFile(configPath, "language_servers: []\n")
+			})
+
+			It("refuses to start before opening the MCP transport", func() {
+				code := run("serve", "--config", configPath)
+				Expect(code).NotTo(Equal(0))
+				Expect(stderr.String()).To(ContainSubstring("no language servers"))
+			})
+		})
+
 		When("two entries claim the same file extension", func() {
 			BeforeEach(func() { writeConfigFile(configPath, twoServersOneExtension) })
 

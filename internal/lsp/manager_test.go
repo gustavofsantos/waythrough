@@ -111,6 +111,50 @@ var _ = Describe("Manager", func() {
 		})
 	})
 
+	When("servers are configured for demand startup", func() {
+		It("starts only the first requested server, once across concurrent waiters", func() {
+			requestedLog := filepath.Join(GinkgoT().TempDir(), "requested.log")
+			unusedLog := filepath.Join(GinkgoT().TempDir(), "unused.log")
+
+			requested := fakeEntry("-instance-log=" + requestedLog)
+			unused := fakeEntry("-instance-log=" + unusedLog)
+			unused.Name = "unused"
+			unused.Filetypes = map[string]string{".unused": "unused"}
+
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{requested, unused}, lsp.WithDemandStart())
+			Expect(manager.Start(ctx)).To(Succeed())
+			Expect(manager.Status("fake")).To(Equal(lsp.StatusIdle))
+			Expect(manager.Status("unused")).To(Equal(lsp.StatusIdle))
+
+			Consistently(func() bool {
+				_, requestedErr := os.Stat(requestedLog)
+				_, unusedErr := os.Stat(unusedLog)
+				return os.IsNotExist(requestedErr) && os.IsNotExist(unusedErr)
+			}, 100*time.Millisecond).Should(BeTrue(),
+				"Start should not launch any demand-started server")
+
+			const waiters = 8
+			results := make(chan error, waiters)
+			for range waiters {
+				go func() {
+					results <- manager.WaitReady(ctx, "fake", 2*time.Second)
+				}()
+			}
+			for range waiters {
+				Expect(<-results).To(Succeed())
+			}
+
+			Expect(logLines(requestedLog)).To(HaveLen(1),
+				"concurrent first requests must share one supervisor")
+			Expect(manager.Status("fake")).To(Equal(lsp.StatusReady))
+			Expect(manager.Status("unused")).To(Equal(lsp.StatusIdle))
+			_, err := os.Stat(unusedLog)
+			Expect(os.IsNotExist(err)).To(BeTrue(),
+				"requesting one server must not index the root with another")
+		})
+	})
+
 	When("a language server reports workDoneProgress for its startup work", func() {
 		It("blocks WaitReady until the progress token closes, then returns", func() {
 			entry := indexingFakeEntry("-progress", "-progress-delay=100ms")

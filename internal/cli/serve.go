@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,6 +24,18 @@ import (
 // them and returns.
 const shutdownGrace = 10 * time.Second
 
+type configPathSource int
+
+const (
+	implicitConfigPath configPathSource = iota
+	explicitConfigPath
+)
+
+type serveConfig struct {
+	config.Config
+	usesBuiltInDefaults bool
+}
+
 func newServeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -32,18 +45,24 @@ func newServeCommand() *cobra.Command {
 	configPath := configFlag(cmd, "serve from")
 	debug := debugFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		return runServe(*configPath, newLogger(cmd.ErrOrStderr(), *debug))
+		pathSource := implicitConfigPath
+		if cmd.Flags().Changed("config") {
+			pathSource = explicitConfigPath
+		}
+		return runServe(*configPath, pathSource, newLogger(cmd.ErrOrStderr(), *debug))
 	}
 
 	return cmd
 }
 
-func runServe(configPath string, logger *slog.Logger) error {
-	cfg, err := config.Load(configPath)
+func runServe(
+	configPath string, pathSource configPathSource, logger *slog.Logger,
+) error {
+	loaded, err := loadServeConfig(configPath, pathSource)
 	if err != nil {
 		return err
 	}
-	if err := config.Validate(cfg); err != nil {
+	if err := config.Validate(loaded.Config); err != nil {
 		return err
 	}
 
@@ -56,19 +75,23 @@ func runServe(configPath string, logger *slog.Logger) error {
 	// The language-server subprocesses live for as long as serve runs, not
 	// for as long as any one MCP session does: only Shutdown below ends
 	// them, never the signal-aware context the MCP transport listens on.
-	manager := lsp.NewManager(root, cfg.LanguageServers, lsp.WithLogger(logger))
+	managerOptions := []lsp.Option{lsp.WithLogger(logger)}
+	if loaded.usesBuiltInDefaults {
+		managerOptions = append(managerOptions, lsp.WithDemandStart())
+	}
+	manager := lsp.NewManager(root, loaded.LanguageServers, managerOptions...)
 	if err := manager.Start(context.Background()); err != nil {
 		return err
 	}
 	logger.Debug("waythrough serving",
 		slog.String("config", absConfigPath),
 		slog.String("root", root),
-		slog.Int("language_servers", len(cfg.LanguageServers)))
+		slog.Int("language_servers", len(loaded.LanguageServers)))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := editor.New(manager, cfg, logger)
+	server := editor.New(manager, loaded.Config, logger)
 	runErr := server.Run(ctx, &mcp.StdioTransport{})
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
@@ -79,4 +102,18 @@ func runServe(configPath string, logger *slog.Logger) error {
 		return fmt.Errorf("mcp session: %w", runErr)
 	}
 	return nil
+}
+
+// loadServeConfig uses built-ins only for the implicit waythrough.yaml path.
+// An explicit --config path is a user assertion that the file must exist, so
+// silently replacing a typo there with defaults would start the wrong servers.
+func loadServeConfig(configPath string, pathSource configPathSource) (serveConfig, error) {
+	cfg, err := config.Load(configPath)
+	if err == nil {
+		return serveConfig{Config: cfg}, nil
+	}
+	if pathSource == implicitConfigPath && errors.Is(err, os.ErrNotExist) {
+		return serveConfig{Config: config.Default(), usesBuiltInDefaults: true}, nil
+	}
+	return serveConfig{}, err
 }

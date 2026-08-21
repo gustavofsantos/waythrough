@@ -64,6 +64,23 @@ var _ = Describe("Restart", func() {
 		cancel()
 	})
 
+	When("a demand-started server has not been used", func() {
+		It("starts that server once and waits until it is ready", func() {
+			instanceLog := filepath.Join(GinkgoT().TempDir(), "instances.log")
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry("-instance-log=" + instanceLog)},
+				lsp.WithDemandStart())
+			Expect(manager.Start(ctx)).To(Succeed())
+			Expect(manager.Status("fake")).To(Equal(lsp.StatusIdle))
+
+			Expect(manager.Restart(ctx, "fake")).To(Succeed())
+
+			Expect(readInstanceLog(instanceLog)).To(HaveLen(1),
+				"a server with no old process should only need its first process")
+			Expect(manager.Status("fake")).To(Equal(lsp.StatusReady))
+		})
+	})
+
 	When("a language server is running", func() {
 		It("ends that process and answers the next request from a new one", func() {
 			instanceLog := filepath.Join(GinkgoT().TempDir(), "instances.log")

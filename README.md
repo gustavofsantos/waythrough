@@ -33,42 +33,57 @@ brew install waythrough
 
 ## Quick start
 
-1. Create a `waythrough.yaml` file in your project root. Each entry
-   names a language server, the command that starts it, and the file
-   extensions it handles:
+1. Install the language server for the code you work on. Waythrough has
+   built-in startup and file-routing defaults for these servers:
 
-   ```yaml
-   language_servers:
-     - name: gopls
-       command: gopls
-       args: []
-       filetypes:
-         .go: go
-   ```
+   | Languages | Server command |
+   | --- | --- |
+   | Clojure | `clojure-lsp` |
+   | Go | `gopls` |
+   | JavaScript and TypeScript | `typescript-language-server --stdio` |
+   | Rust | `rust-analyzer` |
+   | Python | `pyright-langserver --stdio` |
 
-   Run `waythrough init` to write a starter config for Clojure
-   instead. Edit it for your own language servers. Then run
-   `waythrough validate` to check the file for errors.
+   The command must be on the `PATH` the coding agent gives Waythrough.
 
-2. Add Waythrough as an MCP server in your coding agent's config.
-   Pass an absolute path to `--config`, so Waythrough finds
-   `waythrough.yaml` no matter where the agent starts it from. The
-   agent starts Waythrough over stdio:
+2. Add Waythrough as an MCP server in your coding agent's config. Have
+   the agent start it with the project root as its working directory:
 
    ```json
    {
      "mcpServers": {
        "waythrough": {
          "command": "waythrough",
-         "args": ["serve", "--config", "/absolute/path/to/waythrough.yaml"]
+         "args": ["serve"]
        }
      }
    }
    ```
 
-3. Ask your coding agent to find a definition or list references. The
-   agent calls Waythrough's MCP tools. Waythrough forwards the
-   request to the language server for that file type.
+   With no `waythrough.yaml` in that directory, `serve` uses the built-in
+   defaults and starts each server only when a tool first needs its file
+   type. Ask your coding agent to find a definition or list references.
+   Waythrough forwards the request to that file type's server.
+
+3. Add `waythrough.yaml` only when the project needs a different server,
+   command, arguments, environment, readiness gate, or file mapping. The
+   repository file replaces the built-in configuration in full on the next
+   `serve` start. For example, a Go project can customize how gopls starts:
+
+   ```yaml
+   language_servers:
+     - name: gopls
+       command: company-gopls
+       args: ["serve", "--company"]
+       filetypes:
+         .go: go
+   ```
+
+   `waythrough init` writes a Clojure starter file. Edit it as needed,
+   then run `waythrough validate`. An explicit `--config` path must exist;
+   Waythrough never hides a misspelled path by falling back to defaults.
+   Empty files and unknown configuration fields are rejected. Other
+   languages and language servers require a repository file.
 
 ## Tools
 

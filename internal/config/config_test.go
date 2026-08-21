@@ -57,6 +57,23 @@ language_servers:
 		})
 	})
 
+	When("the file contains an unknown field", func() {
+		BeforeEach(func() {
+			writeFile(path, `
+language_server:
+  - name: gopls
+    command: gopls
+    filetypes:
+      .go: go
+`)
+		})
+
+		It("returns a parse error naming the field", func() {
+			_, err := config.Load(path)
+			Expect(err).To(MatchError(ContainSubstring("language_server")))
+		})
+	})
+
 	When("the file does not exist", func() {
 		It("returns an error", func() {
 			_, err := config.Load(filepath.Join(GinkgoT().TempDir(), "missing.yaml"))
@@ -81,6 +98,13 @@ var _ = Describe("Validate", func() {
 	When("every entry has a name, a command, and at least one filetype mapping", func() {
 		It("returns no error", func() {
 			Expect(config.Validate(valid())).To(Succeed())
+		})
+	})
+
+	When("no language servers are configured", func() {
+		It("rejects the unusable configuration", func() {
+			err := config.Validate(config.Config{})
+			Expect(err).To(MatchError(ContainSubstring("no language servers")))
 		})
 	})
 

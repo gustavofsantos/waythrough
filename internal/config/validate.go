@@ -9,6 +9,9 @@ import (
 // Waythrough needs to start it and route files to it.
 func Validate(cfg Config) error {
 	var errs []error
+	if len(cfg.LanguageServers) == 0 {
+		errs = append(errs, errors.New("no language servers configured"))
+	}
 	seenNames := make(map[string]bool, len(cfg.LanguageServers))
 	owner := make(map[string]string) // filetype extension -> owning entry id
 

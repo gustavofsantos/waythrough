@@ -11,7 +11,7 @@ tools and check a change.
 | --- | --- |
 | `cmd/waythrough/` | The `main` package. It only calls `cli.Execute`. |
 | `internal/cli/` | The `waythrough` command-line interface: `init`, `validate`, and `serve`. |
-| `internal/config/` | The `waythrough.yaml` schema, plus its `Load` and `Validate` functions. |
+| `internal/config/` | The built-in language-server defaults and the `waythrough.yaml` schema, loader, and validator. |
 | `internal/lsp/` | Process lifecycle for each configured language server, and the LSP client that talks to it. |
 | `internal/lsp/fakelsp/` | A small language server built only for `internal/lsp` tests. |
 | `internal/editor/` | The MCP server. It turns each MCP tool call into an LSP request, and the LSP response back into MCP output. |
@@ -19,17 +19,22 @@ tools and check a change.
 | `.github/workflows/` | The CI workflow and the release workflow. |
 | `.tools/` | A gitignored directory. It holds the pinned `golangci-lint` binary. |
 | `.goreleaser.yaml` | The GoReleaser config for the release build and the Homebrew tap. |
-| `waythrough.yaml` | An example config file, used when you run Waythrough from this repository. |
+| `waythrough.yaml` | An optional repository override, used when you run Waythrough from this repository. |
 
 ## How a request flows
 
 1. A coding agent starts `waythrough serve` over stdio, as an MCP
    server.
-2. `internal/cli` loads and validates `waythrough.yaml`, through
-   `internal/config`.
-3. `internal/cli` starts an `internal/lsp` manager. The manager
-   starts one subprocess per configured language server, and waits
-   for each one to become ready.
+2. `internal/cli` loads `waythrough.yaml` when it exists, or uses the
+   built-in configuration when the implicit path is absent, then validates
+   the result through `internal/config`. An explicit `--config` path never
+   falls back. A repository file replaces all defaults rather than merging
+   with them.
+3. `internal/cli` starts an `internal/lsp` manager. For built-in defaults,
+   the manager starts a server on the first request routed to it; concurrent
+   first requests share one supervisor. A repository configuration preserves
+   eager startup for every entry. Each server gates requests until it is
+   ready.
 4. `internal/cli` builds the MCP server from `internal/editor`. This
    step registers the `get_definition`, `list_references`,
    `rename_symbol`, `signature_help`, `get_diagnostics`, and
@@ -70,12 +75,13 @@ anything.
 
 ## Server lifecycle
 
-One goroutine owns each language server, from `Start` to shutdown.
-It starts the process, runs the handshake, and waits for the
-process to exit. Then it starts another process, unless the server
-has exited more often than the restart limit allows. A server in
-that state waits for a restart. It does not release its goroutine,
-so exactly one goroutine owns each server at all times.
+Once a language server starts, one goroutine owns it through shutdown.
+Built-in servers have no goroutine until their first request; the manager's
+single-flight gate lets exactly one such request create the owner. That
+goroutine starts the process, runs the handshake, and waits for the process
+to exit. Then it starts another process, unless the server has exited more
+often than the restart limit allows. A server in that state waits for a
+restart without releasing its owner.
 
 This has two results. Every process starts on the context `Start`
 received, so no single tool call can end a language server when
@@ -119,9 +125,16 @@ it would be a second way to do what a shell redirect already does,
 and two ways to reach one behaviour is one way too many. README.md
 shows the redirect.
 
-## Add a language server
+## Configure language servers
 
-Add an entry to `waythrough.yaml`. You need no code change. See the
+`internal/config/defaults.go` configures clojure-lsp, gopls,
+typescript-language-server for JavaScript and TypeScript, rust-analyzer,
+and pyright-langserver. These five entries are a fixed bound: default
+resolution performs no repository walk, and only a server selected by a
+tool call starts and indexes the workspace.
+
+Add `waythrough.yaml` to customize startup or use any other language server.
+The next `serve` start reads that file as the complete configuration. See the
 `language_servers` schema in `internal/config/config.go`.
 
 ## Add an MCP tool

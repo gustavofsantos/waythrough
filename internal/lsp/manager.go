@@ -42,9 +42,12 @@ const (
 type Status int
 
 const (
+	// StatusIdle means no supervisor attempt has begun for this configured
+	// server yet.
+	StatusIdle Status = iota
 	// StatusStarting covers everything from process spawn through the
 	// readiness gate: handshaking, and indexing when readiness is progress.
-	StatusStarting Status = iota
+	StatusStarting
 	// StatusReady means the server can answer a request.
 	StatusReady
 	// StatusFailed means the server crashed more times than the restart
@@ -53,8 +56,7 @@ const (
 	StatusFailed
 )
 
-// Manager starts a subprocess for each configured language server and
-// tracks when each one is ready to answer a request.
+// Manager starts and tracks configured language-server subprocesses.
 type Manager struct {
 	root             string
 	logger           *slog.Logger
@@ -63,9 +65,11 @@ type Manager struct {
 	restartWindow    time.Duration
 	shutdownGrace    time.Duration
 	toolCallTimeout  time.Duration
+	demandStart      bool
 
-	mu    sync.Mutex
-	procs map[string]*serverProcess
+	mu          sync.Mutex
+	lifetimeCtx context.Context
+	procs       map[string]*serverProcess
 }
 
 // Location is a position in a file, 1-based to match how a coding agent
@@ -175,6 +179,14 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithDemandStart makes Start record the manager lifetime without spawning
+// every configured server. The first waiter for a server starts its one
+// supervisor. This is intended for built-in configurations, where starting
+// unrelated installed servers would make each of them index the same root.
+func WithDemandStart() Option {
+	return func(m *Manager) { m.demandStart = true }
+}
+
 // NewManager builds a Manager for entries. root is the project directory
 // passed to each language server as its workspace root.
 //
@@ -224,11 +236,11 @@ func newServerProcess(entry config.LanguageServer, logger *slog.Logger) *serverP
 	}
 }
 
-// Start spawns a subprocess for every configured entry and begins the
-// initialize handshake and readiness tracking for each. It returns once
-// every subprocess has been launched, not once every server is ready — use
-// WaitReady for that. A server that exits unexpectedly is restarted; one
-// that exits too often is not — see WithRestartLimit.
+// Start records ctx as the lifetime of every process and, unless demand-start
+// mode is enabled, starts one supervisor for every configured entry. It
+// returns once the supervisors have been launched, not once every server is
+// ready — use WaitReady for that. A server that exits unexpectedly is
+// restarted; one that exits too often is not — see WithRestartLimit.
 //
 // ctx is the lifetime of every process this Manager owns, the ones a
 // Restart spawns included: runServer is the only code that spawns, and it
@@ -236,16 +248,44 @@ func newServerProcess(entry config.LanguageServer, logger *slog.Logger) *serverP
 // therefore end a language server when that call returns.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	if m.lifetimeCtx == nil {
+		m.lifetimeCtx = ctx
+	}
+	lifetimeCtx := m.lifetimeCtx
+	if m.demandStart {
+		m.mu.Unlock()
+		return nil
+	}
+	procs := make([]*serverProcess, 0, len(m.procs))
 	for _, proc := range m.procs {
-		proc := proc
-		if !proc.beginSupervision() {
-			continue
-		}
-		go m.runServer(ctx, proc)
+		procs = append(procs, proc)
+	}
+	m.mu.Unlock()
+
+	for _, proc := range procs {
+		m.startSupervisor(lifetimeCtx, proc)
 	}
 	return nil
+}
+
+// startSupervisor is the single spawn gate for one configured server. The
+// process-level reservation makes concurrent first requests single-flight.
+func (m *Manager) startSupervisor(ctx context.Context, proc *serverProcess) bool {
+	if ctx == nil || !proc.beginSupervision() {
+		return false
+	}
+	go m.runServer(ctx, proc)
+	return true
+}
+
+// ensureSupervisor starts proc on the Manager lifetime captured by Start.
+// Eager managers reach this with an existing supervisor, so the same call is
+// safe on every request without branching on startup mode.
+func (m *Manager) ensureSupervisor(proc *serverProcess) bool {
+	m.mu.Lock()
+	ctx := m.lifetimeCtx
+	m.mu.Unlock()
+	return m.startSupervisor(ctx, proc)
 }
 
 // runServer owns proc's process from Start until Shutdown or a done ctx:
@@ -338,16 +378,24 @@ func withinWindow(times []time.Time, window time.Duration) []time.Time {
 // WaitReady blocks until the named server is ready, fails permanently, the
 // context is done, or timeout elapses, whichever comes first.
 func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Duration) error {
+	proc, err := m.serverNamed(name)
+	if err != nil {
+		return err
+	}
+	m.ensureSupervisor(proc)
+
 	// Every started server is on attempt 1 or later, so "after attempt 0"
 	// accepts whichever attempt the server happens to be on.
 	return m.waitReady(ctx, name, timeout, 0)
 }
 
 // Restart stops the named server and returns once its replacement has
-// passed its own readiness gate. A server that already spent its crash
-// budget takes a restart too: that is the state a restart is most needed
-// in. Waythrough cannot see that a server answers from a stale index, so
-// the caller is the only judge of when a restart is due.
+// passed its own readiness gate. A demand-started server no request has used
+// yet is started instead, because it has no process to replace. A server that
+// already spent its crash budget takes a restart too: that is the state a
+// restart is most needed in. Waythrough cannot see that a server answers
+// from a stale index, so the caller is the only judge of when a restart is
+// due.
 //
 // The replacement spawns on the lifetime context Start was given, never on
 // ctx. ctx bounds only the wait: how long the stop and the new readiness
@@ -364,6 +412,13 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	proc, err := m.serverNamed(name)
 	if err != nil {
 		return err
+	}
+	started := m.ensureSupervisor(proc)
+	if started || proc.snapshot().status == StatusIdle {
+		// A demand-started server has no process to replace. Starting it is the
+		// only transition that can satisfy the caller's request for a ready one.
+		// Concurrent callers coalesce while the first supervisor claims attempt 1.
+		return m.waitReady(ctx, name, m.toolCallTimeout, 0)
 	}
 
 	// The attempt read here is the one this call retires. Everything below
@@ -1054,7 +1109,7 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 func (p *serverProcess) beginSupervision() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.supervised != nil {
+	if p.supervised != nil || p.shuttingDown {
 		return false
 	}
 	p.supervised = make(chan struct{})
