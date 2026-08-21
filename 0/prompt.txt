@@ -1,0 +1,7 @@
+I want to take a step further and internalize good defaults for common LSP servers without the need to have a waythrough file in the repository. For instance, I want to use this MCP with the company code but I need to pay attention to not commit the file. For now, add support for clojure, golang, javascript, typescript, rust and python common language servers. Any other must be customized
+
+also consider that at any point, in a golang project, the user can create a waythrough file and customize the server startup
+
+---
+
+have you ran the reviewers subagents?

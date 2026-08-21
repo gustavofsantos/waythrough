@@ -1,0 +1,84 @@
+{
+  "cli_version": "0.10.0",
+  "checkpoint_id": "01M0GY408QWH09F20PETHEEQ7S",
+  "session_id": "01a0211b-41d0-74f3-b548-00632da15cdb",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-21T01:14:16.333808046Z",
+  "branch": "main",
+  "checkpoints_count": 2,
+  "save_step_count": 2,
+  "files_touched": [
+    "README.md",
+    "docs/ARCHITECTURE.md",
+    "internal/cli/cli_test.go",
+    "internal/cli/serve.go",
+    "internal/cli/serve_internal_test.go",
+    "internal/config/config.go",
+    "internal/config/config_test.go",
+    "internal/config/defaults.go",
+    "internal/config/defaults_test.go",
+    "internal/config/validate.go",
+    "internal/lsp/manager.go",
+    "internal/lsp/manager_test.go",
+    "internal/lsp/restart_test.go"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.6-sol",
+  "turn_id": "23529a4c78c6",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 309774,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 7353344,
+    "output_tokens": 32620,
+    "api_call_count": 75
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-21T01:14:16.243511931Z",
+    "agent_lines": 175,
+    "agent_removed": 31,
+    "human_added": 198,
+    "human_modified": 96,
+    "human_removed": 0,
+    "total_committed": 469,
+    "total_lines_changed": 500,
+    "agent_percentage": 41.199999999999996,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 25,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".agents/skills/critical-systems-design/SKILL.md": 18,
+        ".claude/settings.local.json": 7
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 7,
+      "user_lines_removed": 0,
+      "agent_lines_added": 289,
+      "agent_lines_removed": 31,
+      "user_added_per_file": {
+        ".claude/settings.local.json": 7
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 7,
+      "user_lines_removed": 0,
+      "agent_lines_added": 289,
+      "agent_lines_removed": 31,
+      "user_added_per_file": {
+        ".claude/settings.local.json": 7
+      }
+    }
+  ]
+}
