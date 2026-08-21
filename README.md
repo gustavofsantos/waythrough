@@ -126,13 +126,14 @@ its place in your agent's tool list:
   "mcpServers": {
     "waythrough": {
       "command": "waythrough",
-      "args": [
-        "serve", "--config", "/absolute/path/to/waythrough.yaml", "--debug"
-      ]
+      "args": ["serve", "--debug"]
     }
   }
 }
 ```
+
+If the project has a custom file, add its existing `--config` arguments
+before `--debug`.
 
 Every record goes to stderr, never to stdout, and covers three
 things:
@@ -171,12 +172,15 @@ shell:
       "command": "sh",
       "args": [
         "-c",
-        "exec waythrough serve --config /absolute/path/to/waythrough.yaml --debug 2>>/tmp/waythrough-debug.log"
+        "exec waythrough serve --debug 2>>/tmp/waythrough-debug.log"
       ]
     }
   }
 }
 ```
+
+Add `--config /absolute/path/to/waythrough.yaml` to the shell command for
+a project that uses a custom file.
 
 Then read it as it fills:
 

@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/gustavofsantos/waythrough/internal/config"
 )
 
 func TestImplicitMissingConfigUsesDefaults(t *testing.T) {
@@ -75,5 +79,37 @@ func TestInvalidRepositoryConfigIsAnError(t *testing.T) {
 
 	if _, err := loadServeConfig(path, implicitConfigPath); err == nil {
 		t.Fatal("load invalid repository config succeeded, want an error")
+	}
+}
+
+func TestServeStartLogNamesBuiltInConfiguration(t *testing.T) {
+	var output bytes.Buffer
+	loaded := serveConfig{Config: config.Default(), usesBuiltInDefaults: true}
+
+	logServeStarted(newLogger(&output, true), loaded,
+		"/project/waythrough.yaml", "/project")
+
+	record := output.String()
+	if !strings.Contains(record, "config_source=built_in") {
+		t.Fatalf("startup record %q does not name built-in configuration", record)
+	}
+	if strings.Contains(record, " config=") {
+		t.Fatalf("startup record %q claims a config file was loaded", record)
+	}
+}
+
+func TestServeStartLogNamesRepositoryConfiguration(t *testing.T) {
+	var output bytes.Buffer
+	loaded := serveConfig{Config: config.Default()}
+
+	logServeStarted(newLogger(&output, true), loaded,
+		"/project/waythrough.yaml", "/project")
+
+	record := output.String()
+	if !strings.Contains(record, "config_source=file") {
+		t.Fatalf("startup record %q does not name file configuration", record)
+	}
+	if !strings.Contains(record, "config=/project/waythrough.yaml") {
+		t.Fatalf("startup record %q does not name the loaded file", record)
 	}
 }

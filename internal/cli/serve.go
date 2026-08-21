@@ -83,10 +83,7 @@ func runServe(
 	if err := manager.Start(context.Background()); err != nil {
 		return err
 	}
-	logger.Debug("waythrough serving",
-		slog.String("config", absConfigPath),
-		slog.String("root", root),
-		slog.Int("language_servers", len(loaded.LanguageServers)))
+	logServeStarted(logger, loaded, absConfigPath, root)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -102,6 +99,23 @@ func runServe(
 		return fmt.Errorf("mcp session: %w", runErr)
 	}
 	return nil
+}
+
+func logServeStarted(
+	logger *slog.Logger, loaded serveConfig, absConfigPath, root string,
+) {
+	configSource := "file"
+	logAttributes := []any{
+		slog.String("root", root),
+		slog.Int("language_servers", len(loaded.LanguageServers)),
+	}
+	if loaded.usesBuiltInDefaults {
+		configSource = "built_in"
+	} else {
+		logAttributes = append(logAttributes, slog.String("config", absConfigPath))
+	}
+	logAttributes = append(logAttributes, slog.String("config_source", configSource))
+	logger.Debug("waythrough serving", logAttributes...)
 }
 
 // loadServeConfig uses built-ins only for the implicit waythrough.yaml path.
