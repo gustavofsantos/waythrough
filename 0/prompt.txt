@@ -1,0 +1,13 @@
+update the README.md including a mermaid diagram describing the architecture of this project and where it fits in the AI-pairing coding daily job
+
+---
+
+the flowchart is indeed correct, but I want to try out other diagrams and other representations.
+
+---
+
+write the versions in the readme so that I can see the render in my ide
+
+---
+
+yeah, lets stick with the layered diagram in the readme and move the others for the technical documentation
