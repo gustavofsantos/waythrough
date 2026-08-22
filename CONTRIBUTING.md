@@ -131,6 +131,13 @@ GitHub Actions then runs [GoReleaser](https://goreleaser.com), which:
 - Pushes an updated `Formula/waythrough.rb` file to `main`, so
   `brew install waythrough` installs the new version.
 
+Each release asset carries the operating system and the architecture
+in its name. mise reads the release through its `github` backend, and
+that backend finds an asset by those two tokens. A change to
+`archives.name_template` in `.goreleaser.yaml` can therefore break
+`mise use -g github:gustavofsantos/waythrough`, even though it leaves
+the Homebrew tap working.
+
 GoReleaser runs `scripts/check.sh` as a hook before it builds
 anything, so a broken release never publishes. Preview a release
 build, without a tag push and without a publish step, with this

@@ -25,6 +25,12 @@ builds:
 archives:
   - id: waythrough
     formats: [tar.gz]
+    # mise installs Waythrough through its github backend, which picks a
+    # release asset by matching the operating system and the architecture
+    # tokens in the asset name, then takes the binary named after the
+    # repository from the archive root. Keep `{{ .Os }}` and `{{ .Arch }}` in
+    # this template, or `mise use -g github:gustavofsantos/waythrough` finds
+    # no asset to install.
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 

@@ -23,13 +23,47 @@ them against a test language server, not against a real one yet.
 
 ## Install
 
-Waythrough publishes binaries for Linux and macOS. This project is
-also its own Homebrew tap. Run these commands to install it:
+Waythrough publishes binaries for Linux and macOS, each for amd64 and
+arm64. Use the installer you already have.
+
+### Homebrew
+
+This project is also its own Homebrew tap. Run these commands:
 
 ```sh
 brew tap gustavofsantos/waythrough https://github.com/gustavofsantos/waythrough
 brew install waythrough
 ```
+
+### mise
+
+[mise](https://mise.jdx.dev) takes the binary straight from the GitHub
+release through its `github` backend, so this path needs no Go
+toolchain. Run this command:
+
+```sh
+mise use -g github:gustavofsantos/waythrough
+```
+
+To pin one version, name the release tag without its leading `v`:
+
+```sh
+mise use -g github:gustavofsantos/waythrough@0.1.0
+```
+
+An older mise names this same backend `ubi`. That name still works,
+and mise removes it in 2027.1.
+
+To build from source instead, use the `go` backend. This path needs
+the Go toolchain, at the version in [go.mod](go.mod):
+
+```sh
+mise use -g go:github.com/gustavofsantos/waythrough/cmd/waythrough
+```
+
+A binary from the `go` backend reports its version as `dev`, because
+`go install` does not apply the version flag that the release build
+sets. Prefer the `github` backend when the version matters.
 
 ## Quick start
 
