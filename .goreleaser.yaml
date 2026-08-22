@@ -52,6 +52,13 @@ brews:
       owner: gustavofsantos
       name: waythrough
       branch: main
+      # Branch protection on `main` requires a pull request. Admins are exempt
+      # from that rule, but the ephemeral Actions token acts as
+      # github-actions[bot], which is not an admin, so the formula commit needs
+      # a personal token owned by a repository admin. The release itself keeps
+      # the ephemeral token, because publishing a release crosses no protected
+      # branch.
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     commit_author:
       name: goreleaser-bot
       email: actions@github.com

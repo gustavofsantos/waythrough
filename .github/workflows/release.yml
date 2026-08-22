@@ -27,3 +27,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The Homebrew formula lands on the protected `main` branch, which
+          # only a repository admin may push to directly. See the `brews`
+          # block in .goreleaser.yaml.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
