@@ -11,3 +11,7 @@ write the versions in the readme so that I can see the render in my ide
 ---
 
 yeah, lets stick with the layered diagram in the readme and move the others for the technical documentation
+
+---
+
+commit your changes
