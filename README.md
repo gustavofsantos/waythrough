@@ -16,6 +16,61 @@ Instead of making your agent piece the codebase together one text
 search at a time, let it ask the tools that already understand your
 code.
 
+## Architecture and the daily pairing loop
+
+Waythrough sits between an AI coding agent and the project workspace. It
+is the code-intelligence and language-server lifecycle layer: the agent
+still owns the reasoning, edits, tests, and final decisions, while
+Waythrough gives it precise answers from the language servers that already
+understand the code.
+
+```mermaid
+flowchart TB
+  subgraph pairing["Daily AI-pairing job"]
+    developer["Developer"] <--> agent["AI coding agent"]
+  end
+
+  subgraph waythrough["Waythrough boundary"]
+    mcp["MCP transport<br/>stdio"]
+    tools["MCP editor tools<br/>definition, references, rename,<br/>signature, diagnostics, restart"]
+    routing["File-extension routing"]
+    lifecycle["LSP manager<br/>readiness, restarts, timeouts"]
+
+    mcp --> tools --> routing --> lifecycle
+  end
+
+  config["Built-ins or<br/>waythrough.yaml"] --> routing
+  config --> lifecycle
+
+  subgraph runtime["Project runtime"]
+    servers["Language server processes"]
+    workspace[("Project workspace")]
+    servers <--> workspace
+  end
+
+  agent <--> mcp
+  lifecycle --> servers
+```
+
+A typical AI-pairing coding day uses the boundary like this:
+
+1. **Orient.** The agent asks for definitions and references instead of
+   guessing from matching text.
+2. **Understand.** It uses signature help and diagnostics while it works
+   through an unfamiliar API or a failing change.
+3. **Change.** The agent edits the workspace. `rename_symbol` returns a
+   cross-file edit plan; it does not write files on the agent's behalf.
+4. **Validate.** The agent runs the project's tests and checks, then uses
+   diagnostics or a targeted `restart_server` when a language server is
+   stale or unhealthy.
+5. **Review and repeat.** The agent brings the results back to the
+   developer for the next decision.
+
+Built-in language servers start on demand, so a normal session pays for
+the language tooling it actually uses. An explicit `waythrough.yaml`
+replaces the built-in configuration when a project needs different
+commands, readiness gates, or file mappings.
+
 ## Status
 
 This project is in early setup. It has six MCP tools. Tests run

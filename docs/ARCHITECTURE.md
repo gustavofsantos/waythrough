@@ -49,6 +49,34 @@ tools and check a change.
 6. When `serve` exits, it shuts down every language server the
    manager started.
 
+### Request sequence
+
+This sequence shows the runtime path for a navigation request. The same
+boundary applies to the other tools, with their LSP method and output shape
+changed as appropriate.
+
+```mermaid
+sequenceDiagram
+  participant D as Developer
+  participant A as AI agent
+  participant W as Waythrough
+  participant M as LSP manager
+  participant L as Language server
+  participant R as Repository
+
+  D->>A: Ask for a code change
+  A->>W: get_definition(file, line, column)
+  W->>W: Route by file extension
+  W->>M: Request definition
+  M->>L: Start on demand or await readiness
+  L->>R: Read and index source
+  L-->>M: Definition locations
+  M-->>W: LSP response
+  W-->>A: MCP result
+  A->>R: Edit files and run tests
+  A-->>D: Explain result and evidence
+```
+
 ## Readiness
 
 An LSP server's process can start before the server can answer a
@@ -87,6 +115,27 @@ This has two results. Every process starts on the context `Start`
 received, so no single tool call can end a language server when
 that call returns. And a restart of a server that gave up needs no
 new goroutine.
+
+The lifecycle can also be read as this state machine:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Idle
+  [*] --> Starting: Explicit config starts eagerly
+
+  Idle --> Starting: First request in demand-start mode
+  Starting --> Ready: Handshake and readiness gate
+  Ready --> Starting: Recoverable crash
+  Ready --> Starting: restart_server
+  Ready --> Failed: Restart budget exhausted
+  Starting --> Failed: Startup failures exhausted
+  Failed --> Starting: Explicit restart_server
+
+  Ready --> Stopped: serve exits
+  Starting --> Stopped: serve exits
+  Failed --> Stopped: serve exits
+  Stopped --> [*]
+```
 
 ## Debug logging
 
