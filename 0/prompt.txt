@@ -1,0 +1,11 @@
+I pushed a new tag and the github workflow to create the release failed, can you access it? https://github.com/gustavofsantos/waythrough/actions/runs/32588936048/job/97069580964#step:4:68
+
+If not, I can copy and paste the logs with the error
+
+---
+
+apply the PAT change
+
+---
+
+yeah, try it out
