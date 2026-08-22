@@ -32,8 +32,13 @@ This project is also its own Homebrew tap. Run these commands:
 
 ```sh
 brew tap gustavofsantos/waythrough https://github.com/gustavofsantos/waythrough
+brew trust gustavofsantos/waythrough
 brew install waythrough
 ```
+
+Homebrew 6 refuses to load a formula from a tap that you do not trust,
+so the `brew trust` command is necessary. That command is new in
+Homebrew 6. On an older Homebrew it does not exist, so skip it.
 
 ### mise
 
