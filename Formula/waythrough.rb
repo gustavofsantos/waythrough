@@ -5,20 +5,20 @@
 class Waythrough < Formula
   desc "MCP server that connects coding agents to LSP servers"
   homepage "https://github.com/gustavofsantos/waythrough"
-  version "0.1.1"
+  version "0.1.2"
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/gustavofsantos/waythrough/releases/download/v0.1.1/waythrough_0.1.1_darwin_amd64.tar.gz"
-      sha256 "b8b00f5dda9f6824d899b191038cf55306d68e90bce828bf62f65432b95ce0f7"
+      url "https://github.com/gustavofsantos/waythrough/releases/download/v0.1.2/waythrough_0.1.2_darwin_amd64.tar.gz"
+      sha256 "f86502256dcb517b30a90bbea35bf11f49e1108443206b77690687707edf1590"
 
       define_method(:install) do
         bin.install "waythrough"
       end
     end
     if Hardware::CPU.arm?
-      url "https://github.com/gustavofsantos/waythrough/releases/download/v0.1.1/waythrough_0.1.1_darwin_arm64.tar.gz"
-      sha256 "cf44e450671c1dc838014b2538a9e667d5effc37dad346bb978ae8a0dbc4202f"
+      url "https://github.com/gustavofsantos/waythrough/releases/download/v0.1.2/waythrough_0.1.2_darwin_arm64.tar.gz"
+      sha256 "eba9cd4cdc3a47dfb0e8215817984c9b2362c7c825afa04cea5b8cc71e1a46e2"
 
       define_method(:install) do
         bin.install "waythrough"
@@ -28,15 +28,15 @@ class Waythrough < Formula
 
   on_linux do
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-      url "https://github.com/gustavofsantos/waythrough/releases/download/v0.1.1/waythrough_0.1.1_linux_amd64.tar.gz"
-      sha256 "eecd701511b9d934fa33b914a13b36408e6280d0280903f437d69b91b88f4f8e"
+      url "https://github.com/gustavofsantos/waythrough/releases/download/v0.1.2/waythrough_0.1.2_linux_amd64.tar.gz"
+      sha256 "e772f81f6ff9712c06f88e01ac31b808a2616f008b03df0cfff1e081649ab027"
       define_method(:install) do
         bin.install "waythrough"
       end
     end
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
-      url "https://github.com/gustavofsantos/waythrough/releases/download/v0.1.1/waythrough_0.1.1_linux_arm64.tar.gz"
-      sha256 "68983e17fdc4a4fa000d54427a0f753b2ae21587181d15d70168eddcf1ee3f56"
+      url "https://github.com/gustavofsantos/waythrough/releases/download/v0.1.2/waythrough_0.1.2_linux_arm64.tar.gz"
+      sha256 "0724a2d7e1ccf006b2cc9d2da0a50753b0aa4bf3fc2be4a01ef57fe0e4cc0c92"
       define_method(:install) do
         bin.install "waythrough"
       end
