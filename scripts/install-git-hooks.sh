@@ -43,5 +43,4 @@ EOF
 	echo "Installed $hook_name hook at $target"
 }
 
-install_hook pre-commit
 install_hook pre-push
