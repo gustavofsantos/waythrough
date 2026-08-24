@@ -32,7 +32,7 @@ flowchart TB
 
   subgraph waythrough["Waythrough boundary"]
     mcp["MCP transport<br/>stdio"]
-    tools["MCP editor tools<br/>definition, references, rename,<br/>signature, diagnostics, restart"]
+    tools["MCP editor tools<br/>definition, references, rename,<br/>signature, calls, diagnostics, restart"]
     routing["File-extension routing"]
     lifecycle["LSP manager<br/>readiness, restarts, timeouts"]
 
@@ -231,6 +231,15 @@ Waythrough exposes these MCP tools to a connected coding agent:
 - `signature_help` — list the signatures a call could match, given a
   file position inside that call. It also says which signature and
   which parameter the position is on.
+- `get_call_hierarchy` — list one level of direct incoming or outgoing
+  calls for the symbols at a file position. Set `direction` to
+  `incoming` or `outgoing`. The tool returns each symbol and its call
+  sites as 1-based file locations. It queries at most 16 prepared roots,
+  and accepts at most 4,096 calls and 16,384 call sites across them. It
+  returns an explicit error instead of a partial result. A language
+  server that does not advertise call hierarchy support also returns an
+  explicit error. Static call hierarchies can omit dynamic calls. Use
+  `list_references` when you need a broader search.
 - `get_diagnostics` — list the problems a language server finds in a
   file. The language server must advertise pull diagnostics at its
   handshake. One that does not fails the call with an error naming it,

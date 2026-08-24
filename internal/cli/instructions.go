@@ -52,6 +52,8 @@ const agentInstructions = instructionsStartMarker + "\n" +
 	"- Go to definition → `get_definition`\n" +
 	"- Find all references → `list_references`\n" +
 	"- Which argument goes here → `signature_help`\n" +
+	"- Direct callers or callees → `get_call_hierarchy`, plus `direction`\n" +
+	"  (incoming or outgoing; one level per call)\n" +
 	"- Rename across the project → `rename_symbol`, plus `new_name`\n" +
 	"  (returns edits; you apply them)\n" +
 	"\n" +

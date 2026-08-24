@@ -37,15 +37,18 @@ tools and check a change.
    ready.
 4. `internal/cli` builds the MCP server from `internal/editor`. This
    step registers the `get_definition`, `list_references`,
-   `rename_symbol`, `signature_help`, `get_diagnostics`, and
-   `restart_server` tools.
+   `rename_symbol`, `signature_help`, `get_call_hierarchy`,
+   `get_diagnostics`, and `restart_server` tools.
 5. The MCP server serves tool calls until the agent's session ends.
    `internal/editor` routes each call, by the file extension in the
    call, to the language server that handles it. It sends the LSP
    request through the `internal/lsp` manager, and it turns the LSP
-   response into the tool's output shape. `restart_server` is the
-   one tool that names its language server instead, because it acts
-   on a whole server rather than on a file.
+   response into the tool's output shape. Call hierarchy performs one
+   prepare request, then one directed request at a time for each prepared
+   root, up to 16 roots. One 30-second deadline covers the full operation.
+   The result is also capped at 4,096 calls and 16,384 call sites.
+   `restart_server` is the one tool that names its language server instead,
+   because it acts on a whole server rather than on a file.
 6. When `serve` exits, it shuts down every language server the
    manager started.
 
