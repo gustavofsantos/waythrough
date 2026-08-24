@@ -40,6 +40,7 @@ func newRootCommand() *cobra.Command {
 	}
 
 	root.AddCommand(newInitCommand())
+	root.AddCommand(newInstructionsCommand())
 	root.AddCommand(newValidateCommand())
 	root.AddCommand(newServeCommand())
 

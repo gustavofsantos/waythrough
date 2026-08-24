@@ -10,7 +10,7 @@ tools and check a change.
 | Path | Content |
 | --- | --- |
 | `cmd/waythrough/` | The `main` package. It only calls `cli.Execute`. |
-| `internal/cli/` | The `waythrough` command-line interface: `init`, `validate`, and `serve`. |
+| `internal/cli/` | The `waythrough` command-line interface: `init`, `instructions`, `validate`, and `serve`. |
 | `internal/config/` | The built-in language-server defaults and the `waythrough.yaml` schema, loader, and validator. |
 | `internal/lsp/` | Process lifecycle for each configured language server, and the LSP client that talks to it. |
 | `internal/lsp/fakelsp/` | A small language server built only for `internal/lsp` tests. |

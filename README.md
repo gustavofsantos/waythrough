@@ -159,7 +159,20 @@ sets. Prefer the `github` backend when the version matters.
    type. Ask your coding agent to find a definition or list references.
    Waythrough forwards the request to that file type's server.
 
-3. Add `waythrough.yaml` only when the project needs a different server,
+3. Tell your agent to use the tools. An agent that does not know they
+   exist keeps searching for text. `waythrough instructions` prints a
+   short block for the rules file your agent already reads, so append it
+   there:
+
+   ```sh
+   waythrough instructions >> AGENTS.md
+   ```
+
+   Use `CLAUDE.md`, `.cursor/rules/waythrough.md`, or whatever your tool
+   reads in place of `AGENTS.md`. The block names every tool below and
+   nothing else, so re-run it after an upgrade to pick up new tools.
+
+4. Add `waythrough.yaml` only when the project needs a different server,
    command, arguments, environment, readiness gate, or file mapping. The
    repository file replaces the built-in configuration in full on the next
    `serve` start. For example, a Go project can customize how gopls starts:
