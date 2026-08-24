@@ -770,13 +770,9 @@ func incomingCallHierarchy(
 		Calls:  make([]Call, len(incoming)),
 	}
 	for index, call := range incoming {
-		sites := make([]Location, len(call.FromRanges))
-		for siteIndex, callSite := range call.FromRanges {
-			sites[siteIndex] = locationFromRange(call.From.URI, callSite)
-		}
 		hierarchy.Calls[index] = Call{
 			Symbol:    callHierarchySymbol(call.From),
-			CallSites: sites,
+			CallSites: locationsFromRanges(call.From.URI, call.FromRanges),
 		}
 	}
 	return hierarchy
@@ -790,16 +786,20 @@ func outgoingCallHierarchy(
 		Calls:  make([]Call, len(outgoing)),
 	}
 	for index, call := range outgoing {
-		sites := make([]Location, len(call.FromRanges))
-		for siteIndex, callSite := range call.FromRanges {
-			sites[siteIndex] = locationFromRange(root.URI, callSite)
-		}
 		hierarchy.Calls[index] = Call{
 			Symbol:    callHierarchySymbol(call.To),
-			CallSites: sites,
+			CallSites: locationsFromRanges(root.URI, call.FromRanges),
 		}
 	}
 	return hierarchy
+}
+
+func locationsFromRanges(docURI uri.URI, ranges []protocol.Range) []Location {
+	locations := make([]Location, len(ranges))
+	for index, sourceRange := range ranges {
+		locations[index] = locationFromRange(docURI, sourceRange)
+	}
+	return locations
 }
 
 func callHierarchySymbol(item protocol.CallHierarchyItem) Symbol {
