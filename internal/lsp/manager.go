@@ -195,12 +195,17 @@ func WithShutdownGrace(d time.Duration) Option {
 	return func(m *Manager) { m.shutdownGrace = d }
 }
 
-// WithToolCallTimeout overrides how long a request such as Definition waits
-// for its server to become ready before giving up. It does not bound the LSP
-// operation after readiness; callers bound ordinary requests with ctx, while
-// call hierarchy has its own multi-request timeout.
-func WithToolCallTimeout(d time.Duration) Option {
+// WithReadinessTimeout overrides how long a request waits for its language
+// server to become ready before giving up. It does not bound the LSP operation
+// after readiness.
+func WithReadinessTimeout(d time.Duration) Option {
 	return func(m *Manager) { m.readinessTimeout = d }
+}
+
+// WithToolCallTimeout is kept for compatibility.
+// Deprecated: use WithReadinessTimeout.
+func WithToolCallTimeout(d time.Duration) Option {
+	return WithReadinessTimeout(d)
 }
 
 // WithCallHierarchyTimeout overrides the one deadline covering file sync,

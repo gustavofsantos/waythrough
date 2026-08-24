@@ -209,7 +209,7 @@ var _ = Describe("call hierarchy", func() {
 				"-call-hierarchy-roots-count=1",
 				"-call-hierarchy-delay=50ms")
 			manager := lsp.NewManager(root, []config.LanguageServer{entry},
-				lsp.WithToolCallTimeout(20*time.Millisecond),
+				lsp.WithReadinessTimeout(20*time.Millisecond),
 				lsp.WithCallHierarchyTimeout(time.Second))
 			Expect(manager.Start(ctx)).To(Succeed())
 			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())

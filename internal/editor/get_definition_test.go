@@ -206,7 +206,7 @@ var _ = Describe("get_definition", func() {
 			cfg := fakeConfig("-crash")
 			manager := lsp.NewManager(root, cfg.LanguageServers,
 				lsp.WithRestartLimit(2, time.Minute),
-				lsp.WithToolCallTimeout(5*time.Second))
+				lsp.WithReadinessTimeout(5*time.Second))
 			session := connect(ctx, manager, cfg)
 
 			result := callTool(ctx, session, "get_definition", "main.fake", 1, 1)
