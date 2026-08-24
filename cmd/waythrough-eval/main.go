@@ -15,6 +15,7 @@ import (
 func main() {
 	fixtureDirectory := flag.String("fixture", "", "fixture directory containing manifest.json")
 	scenarioName := flag.String("scenario", "", "scenario name from manifest.json")
+	repeat := flag.Int("repeat", 1, "number of cold/warm measurements to run")
 	format := flag.String("format", "json", "output format; only json is supported")
 	flag.Parse()
 
@@ -30,6 +31,7 @@ func main() {
 	report, err := eval.Run(ctx, eval.Options{
 		FixtureDirectory: *fixtureDirectory,
 		ScenarioName:     *scenarioName,
+		Repeat:           *repeat,
 	})
 	if err != nil {
 		fail(err)

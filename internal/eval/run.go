@@ -22,11 +22,13 @@ import (
 type Options struct {
 	FixtureDirectory string
 	ScenarioName     string
+	Repeat           int
 }
 
 type Report struct {
-	ScenarioCount int      `json:"scenario_count"`
-	Results       []Result `json:"results"`
+	ScenarioCount int           `json:"scenario_count"`
+	Results       []Result      `json:"results"`
+	Measurements  []Measurement `json:"measurements,omitempty"`
 }
 
 type Result struct {
@@ -36,11 +38,25 @@ type Result struct {
 	Error     string     `json:"error,omitempty"`
 }
 
+type Measurement struct {
+	Method      string `json:"method"`
+	Phase       string `json:"phase"`
+	Repetition  int    `json:"repetition"`
+	ElapsedMS   int64  `json:"elapsed_ms"`
+	OutputBytes int    `json:"output_bytes"`
+	Correct     bool   `json:"correct"`
+	Error       string `json:"error,omitempty"`
+}
+
 type toolLocations struct {
 	Locations []Location `json:"locations"`
 }
 
 func Run(ctx context.Context, options Options) (Report, error) {
+	repeat, err := normalizeRepeat(options.Repeat)
+	if err != nil {
+		return Report{}, err
+	}
 	fixtureDirectory, err := filepath.Abs(options.FixtureDirectory)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve fixture directory: %w", err)
@@ -50,72 +66,164 @@ func Run(ctx context.Context, options Options) (Report, error) {
 		return Report{}, err
 	}
 
-	waythroughResult := runWaythrough(ctx, fixtureDirectory, scenario)
-	textOnlyResult := runTextOnly(ctx, fixtureDirectory, scenario)
+	waythroughResult, waythroughMeasurements := runWaythrough(
+		ctx, fixtureDirectory, scenario, repeat)
+	textOnlyResult, textOnlyMeasurements := runTextOnly(
+		ctx, fixtureDirectory, scenario, repeat)
 	return Report{
 		ScenarioCount: 1,
 		Results:       []Result{waythroughResult, textOnlyResult},
+		Measurements:  append(waythroughMeasurements, textOnlyMeasurements...),
 	}, nil
 }
 
 func runWaythrough(
-	ctx context.Context, fixtureDirectory string, scenario Scenario,
-) (result Result) {
+	ctx context.Context, fixtureDirectory string, scenario Scenario, repeat int,
+) (result Result, measurements []Measurement) {
 	result = Result{Method: "waythrough"}
-
-	cfg := config.Default()
-	manager := lsp.NewManager(fixtureDirectory, cfg.LanguageServers, lsp.WithDemandStart())
-	if err := manager.Start(ctx); err != nil {
+	runner, err := newWaythroughRunner(ctx, fixtureDirectory)
+	if err != nil {
 		result.Error = err.Error()
-		return result
+		return result, nil
 	}
 	defer func() {
-		if err := shutdownManager(manager); err != nil && result.Error == "" {
-			result.Error = fmt.Sprintf("shutdown language servers: %v", err)
+		if err := runner.close(); err != nil && result.Error == "" {
+			result.Error = fmt.Sprintf("close Waythrough runner: %v", err)
 			result.Correct = false
 		}
 	}()
 
+	for repetition := 1; repetition <= repeat; repetition++ {
+		run := runner.run(ctx, fixtureDirectory, scenario)
+		result = run.Result
+		measurements = append(measurements, run.measurement("waythrough", repetition))
+		if result.Error != "" {
+			break
+		}
+	}
+	return result, measurements
+}
+
+type waythroughRunner struct {
+	manager *lsp.Manager
+	session *mcp.ClientSession
+}
+
+func newWaythroughRunner(ctx context.Context, fixtureDirectory string) (*waythroughRunner, error) {
+	cfg := config.Default()
+	manager := lsp.NewManager(fixtureDirectory, cfg.LanguageServers, lsp.WithDemandStart())
+	if err := manager.Start(ctx); err != nil {
+		return nil, err
+	}
+	runner := &waythroughRunner{manager: manager}
 	server := editor.New(manager, cfg, slog.New(slog.DiscardHandler))
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
-		result.Error = fmt.Sprintf("connect MCP server: %v", err)
-		return result
+		return nil, errors.Join(err, shutdownManager(manager))
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "waythrough-eval", Version: "0.1.0"}, nil)
 	session, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
-		result.Error = fmt.Sprintf("connect MCP client: %v", err)
-		return result
+		return nil, errors.Join(err, shutdownManager(manager))
 	}
-	callResult, callErr := session.CallTool(ctx, &mcp.CallToolParams{
+	runner.session = session
+	return runner, nil
+}
+
+func (runner *waythroughRunner) run(
+	ctx context.Context, fixtureDirectory string, scenario Scenario,
+) measuredRun {
+	start := time.Now()
+	result := Result{Method: "waythrough"}
+	callResult, err := runner.session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "get_definition",
 		Arguments: map[string]any{
 			"file": scenario.File, "line": scenario.Line, "column": scenario.Column,
 		},
 	})
-	closeErr := session.Close()
-	if callErr != nil {
-		result.Error = fmt.Sprintf("call get_definition: %v", callErr)
-		return result
-	}
-	if closeErr != nil {
-		result.Error = fmt.Sprintf("close MCP client: %v", closeErr)
-		return result
+	outputBytes := toolOutputBytes(callResult)
+	if err != nil {
+		result.Error = fmt.Sprintf("call get_definition: %v", err)
+		return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: outputBytes}
 	}
 
 	locations, err := decodeToolLocations(callResult, fixtureDirectory)
 	if err != nil {
 		result.Error = err.Error()
-		return result
+		return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: outputBytes}
 	}
 	result.Locations = locations
 	result.Correct = sameLocations(locations, scenario.Gold)
-	return result
+	return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: outputBytes}
 }
 
-func runTextOnly(ctx context.Context, fixtureDirectory string, scenario Scenario) Result {
+func (runner *waythroughRunner) close() error {
+	var closeErrors []error
+	if runner.session != nil {
+		if err := runner.session.Close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close MCP client: %w", err))
+		}
+	}
+	if runner.manager != nil {
+		if err := shutdownManager(runner.manager); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("shutdown language servers: %w", err))
+		}
+	}
+	return errors.Join(closeErrors...)
+}
+
+func toolOutputBytes(result *mcp.CallToolResult) int {
+	if result == nil {
+		return 0
+	}
+	total := 0
+	for _, content := range result.Content {
+		text, ok := content.(*mcp.TextContent)
+		if ok {
+			total += len(text.Text)
+		}
+	}
+	return total
+}
+
+func runTextOnly(
+	ctx context.Context, fixtureDirectory string, scenario Scenario, repeat int,
+) (result Result, measurements []Measurement) {
+	result = Result{Method: "text_only"}
+	for repetition := 1; repetition <= repeat; repetition++ {
+		run := runTextOnlyOnce(ctx, fixtureDirectory, scenario)
+		result = run.Result
+		measurements = append(measurements, run.measurement("text_only", repetition))
+		if result.Error != "" {
+			break
+		}
+	}
+	return result, measurements
+}
+
+type measuredRun struct {
+	Result      Result
+	Elapsed     time.Duration
+	OutputBytes int
+}
+
+func (run measuredRun) measurement(method string, repetition int) Measurement {
+	return Measurement{
+		Method:      method,
+		Phase:       measurementPhase(repetition),
+		Repetition:  repetition,
+		ElapsedMS:   run.Elapsed.Milliseconds(),
+		OutputBytes: run.OutputBytes,
+		Correct:     run.Result.Correct,
+		Error:       run.Result.Error,
+	}
+}
+
+func runTextOnlyOnce(
+	ctx context.Context, fixtureDirectory string, scenario Scenario,
+) measuredRun {
+	start := time.Now()
 	result := Result{Method: "text_only"}
 	command := exec.CommandContext(ctx, "rg", "--line-number", "--column",
 		"--fixed-strings", "--glob", "*.go", scenario.Symbol, ".")
@@ -123,17 +231,17 @@ func runTextOnly(ctx context.Context, fixtureDirectory string, scenario Scenario
 	output, err := command.CombinedOutput()
 	if err != nil && !isNoMatches(err) {
 		result.Error = fmt.Sprintf("run rg: %v\n%s", err, output)
-		return result
+		return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: len(output)}
 	}
 
 	locations, err := parseRipgrepLocations(string(output))
 	if err != nil {
 		result.Error = err.Error()
-		return result
+		return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: len(output)}
 	}
 	result.Locations = locations
 	result.Correct = sameLocations(locations, scenario.Gold)
-	return result
+	return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: len(output)}
 }
 
 func isNoMatches(err error) bool {
