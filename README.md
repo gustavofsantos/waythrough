@@ -256,6 +256,9 @@ Waythrough exposes these MCP tools to a connected coding agent:
   longer match the code on disk. Waythrough cannot see that a
   server answers from a stale index, so your agent must decide.
 
+File-based tools accept regular source files up to 16 MiB. Waythrough rejects
+larger files and non-regular paths before it sends content to a language server.
+
 ## See what it is doing
 
 `serve` is quiet by default: it says nothing on its own, because

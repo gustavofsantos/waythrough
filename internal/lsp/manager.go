@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -1537,7 +1536,7 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 func (p *serverProcess) syncFileOnAttempt(
 	ctx context.Context, path string, attempt serverAttempt,
 ) error {
-	content, err := os.ReadFile(path)
+	content, err := readSourceFile(ctx, path)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
 	}

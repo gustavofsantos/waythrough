@@ -43,8 +43,9 @@ tools and check a change.
    `internal/editor` routes each call, by the file extension in the
    call, to the language server that handles it. It sends the LSP
    request through the `internal/lsp` manager, and it turns the LSP
-   response into the tool's output shape. LSP response frames have an 8 KiB
-   header limit and a 64 MiB body limit. Call hierarchy performs one prepare
+   response into the tool's output shape. File synchronization accepts only
+   regular source files up to 16 MiB. LSP response frames have an 8 KiB header
+   limit and a 64 MiB body limit. Call hierarchy performs one prepare
    request, then directed requests in batches of at most four for up to 16
    prepared roots. Each directed result has an 8 MiB decoder limit. After the
    server is ready, one 30-second deadline covers file synchronization,
