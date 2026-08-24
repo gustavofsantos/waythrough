@@ -36,6 +36,7 @@ const (
 	defaultRestartWindow   = 60 * time.Second
 	defaultShutdownGrace   = 5 * time.Second
 	defaultToolCallTimeout = 30 * time.Second
+	maxCallHierarchyRoots  = 16
 )
 
 // Status is a language server's place in its own lifecycle.
@@ -78,6 +79,30 @@ type Location struct {
 	File   string
 	Line   int
 	Column int
+}
+
+// Symbol identifies one callable declaration in a call hierarchy. Location
+// is the selection the server says should be revealed, rather than the whole
+// declaration range, so a caller can use it as the next hierarchy position.
+type Symbol struct {
+	Name     string
+	Kind     string
+	Detail   string
+	Location Location
+}
+
+// Call is one direct edge from a hierarchy root. CallSites names every
+// source position that contributes that edge.
+type Call struct {
+	Symbol    Symbol
+	CallSites []Location
+}
+
+// CallHierarchy groups one prepared root with its direct calls. A position
+// can prepare more than one root, and no root is selected silently.
+type CallHierarchy struct {
+	Symbol Symbol
+	Calls  []Call
 }
 
 // Edit is a range replacement in a file, 1-based to match Location. Unlike
@@ -588,6 +613,53 @@ func (m *Manager) SignatureHelp(
 	return signatureHelpFromProtocol(result)
 }
 
+// CallHierarchy asks the named server for the direct incoming calls of every
+// symbol prepared at a 1-based position. The prepared item is sent back
+// verbatim because its Data field belongs to the language server.
+func (m *Manager) CallHierarchy(
+	ctx context.Context, name, file string, line, column int, direction string,
+) ([]CallHierarchy, error) {
+	if direction != "incoming" {
+		return nil, fmt.Errorf("call hierarchy direction must be incoming, got %q", direction)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, m.toolCallTimeout)
+	defer cancel()
+
+	proc, path, err := m.prepare(ctx, name, file)
+	if err != nil {
+		return nil, err
+	}
+	if err := proc.requireCallHierarchy(name); err != nil {
+		return nil, err
+	}
+
+	server := proc.currentServer()
+	items, err := server.PrepareCallHierarchy(ctx, &protocol.CallHierarchyPrepareParams{
+		TextDocumentPositionParams: textDocumentPosition(path, line, column),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("prepare call hierarchy: %w", err)
+	}
+	if len(items) > maxCallHierarchyRoots {
+		return nil, fmt.Errorf(
+			"prepare call hierarchy returned %d roots; maximum is %d",
+			len(items), maxCallHierarchyRoots)
+	}
+
+	hierarchies := make([]CallHierarchy, len(items))
+	for index, item := range items {
+		calls, err := server.IncomingCalls(ctx, &protocol.CallHierarchyIncomingCallsParams{
+			Item: item,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
+		}
+		hierarchies[index] = incomingCallHierarchy(item, calls)
+	}
+	return hierarchies, nil
+}
+
 // Diagnostics asks the named server what is wrong in file, waiting for the
 // server to be ready first and syncing the file's current on-disk content to
 // it before asking. file may be relative to Manager's root or absolute. A
@@ -675,6 +747,98 @@ func locationsFromDefinitionResult(
 		return nil, fmt.Errorf(
 			"definition for %s: unsupported result shape %T (linkSupport was not advertised)",
 			requestedPath, result)
+	}
+}
+
+func incomingCallHierarchy(
+	root protocol.CallHierarchyItem, incoming []protocol.CallHierarchyIncomingCall,
+) CallHierarchy {
+	hierarchy := CallHierarchy{
+		Symbol: callHierarchySymbol(root),
+		Calls:  make([]Call, len(incoming)),
+	}
+	for index, call := range incoming {
+		sites := make([]Location, len(call.FromRanges))
+		for siteIndex, callSite := range call.FromRanges {
+			sites[siteIndex] = locationFromRange(call.From.URI, callSite)
+		}
+		hierarchy.Calls[index] = Call{
+			Symbol:    callHierarchySymbol(call.From),
+			CallSites: sites,
+		}
+	}
+	return hierarchy
+}
+
+func callHierarchySymbol(item protocol.CallHierarchyItem) Symbol {
+	detail := ""
+	if item.Detail != nil {
+		detail = *item.Detail
+	}
+	return Symbol{
+		Name:     item.Name,
+		Kind:     symbolKindName(item.Kind),
+		Detail:   detail,
+		Location: locationFromRange(item.URI, item.SelectionRange),
+	}
+}
+
+func symbolKindName(kind protocol.SymbolKind) string {
+	switch kind {
+	case protocol.SymbolKindFile:
+		return "file"
+	case protocol.SymbolKindModule:
+		return "module"
+	case protocol.SymbolKindNamespace:
+		return "namespace"
+	case protocol.SymbolKindPackage:
+		return "package"
+	case protocol.SymbolKindClass:
+		return "class"
+	case protocol.SymbolKindMethod:
+		return "method"
+	case protocol.SymbolKindProperty:
+		return "property"
+	case protocol.SymbolKindField:
+		return "field"
+	case protocol.SymbolKindConstructor:
+		return "constructor"
+	case protocol.SymbolKindEnum:
+		return "enum"
+	case protocol.SymbolKindInterface:
+		return "interface"
+	case protocol.SymbolKindFunction:
+		return "function"
+	case protocol.SymbolKindVariable:
+		return "variable"
+	case protocol.SymbolKindConstant:
+		return "constant"
+	case protocol.SymbolKindString:
+		return "string"
+	case protocol.SymbolKindNumber:
+		return "number"
+	case protocol.SymbolKindBoolean:
+		return "boolean"
+	case protocol.SymbolKindArray:
+		return "array"
+	case protocol.SymbolKindObject:
+		return "object"
+	case protocol.SymbolKindKey:
+		return "key"
+	case protocol.SymbolKindNull:
+		return "null"
+	case protocol.SymbolKindEnumMember:
+		return "enum_member"
+	case protocol.SymbolKindStruct:
+		return "struct"
+	case protocol.SymbolKindEvent:
+		return "event"
+	case protocol.SymbolKindOperator:
+		return "operator"
+	case protocol.SymbolKindTypeParameter:
+		return "type_parameter"
+	default:
+		return "unknown"
 	}
 }
 
@@ -896,10 +1060,14 @@ func filePathFromURI(docURI uri.URI) string {
 }
 
 func locationFromProtocol(loc protocol.Location) Location {
+	return locationFromRange(loc.URI, loc.Range)
+}
+
+func locationFromRange(docURI uri.URI, sourceRange protocol.Range) Location {
 	return Location{
-		File:   filePathFromURI(loc.URI),
-		Line:   int(loc.Range.Start.Line) + 1,
-		Column: int(loc.Range.Start.Character) + 1,
+		File:   filePathFromURI(docURI),
+		Line:   int(sourceRange.Start.Line) + 1,
+		Column: int(sourceRange.Start.Character) + 1,
 	}
 }
 
@@ -1032,6 +1200,31 @@ func (p *serverProcess) requirePullDiagnostics(name string) error {
 	}
 	if p.capabilities.DiagnosticProvider == nil {
 		return fmt.Errorf("language server %q does not support pull diagnostics", name)
+	}
+	return nil
+}
+
+// requireCallHierarchy reads status and capability in one lock hold so a
+// restart cannot make a retired attempt's advertisement look current.
+func (p *serverProcess) requireCallHierarchy(name string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.status != StatusReady {
+		return fmt.Errorf("language server %q restarted while this call was in flight", name)
+	}
+
+	supported := false
+	switch provider := p.capabilities.CallHierarchyProvider.(type) {
+	case protocol.Boolean:
+		supported = bool(provider)
+	case *protocol.CallHierarchyOptions:
+		supported = provider != nil
+	case *protocol.CallHierarchyRegistrationOptions:
+		supported = provider != nil
+	}
+	if !supported {
+		return fmt.Errorf("language server %q does not support call hierarchy", name)
 	}
 	return nil
 }
@@ -1286,6 +1479,9 @@ func (p *serverProcess) handshake(ctx context.Context, root string) error {
 		RootURI: &rootURI,
 		Capabilities: protocol.ClientCapabilities{
 			Window: &protocol.WindowClientCapabilities{WorkDoneProgress: &workDoneProgress},
+			TextDocument: &protocol.TextDocumentClientCapabilities{
+				CallHierarchy: &protocol.CallHierarchyClientCapabilities{},
+			},
 		},
 	})
 	if err != nil {

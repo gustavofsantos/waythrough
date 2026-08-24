@@ -56,6 +56,11 @@ func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Serv
 			"Use it inside a call to learn what the next argument must be.",
 	}, e.signatureHelp)
 	mcp.AddTool(server, &mcp.Tool{
+		Name: "get_call_hierarchy",
+		Description: "List the direct incoming or outgoing calls of every symbol " +
+			"at a file position. Direction must be incoming or outgoing.",
+	}, e.getCallHierarchy)
+	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_diagnostics",
 		Description: "List the problems a language server finds in a file: where each " +
 			"one is, how serious it is, and what it says. Use it instead of reading " +
@@ -182,6 +187,34 @@ type signatureHelpOutput struct {
 	ActiveParameter int         `json:"active_parameter" jsonschema:"0-based parameter index"`
 }
 
+type callHierarchyInput struct {
+	position
+	Direction string `json:"direction" jsonschema:"call direction: incoming or outgoing"`
+}
+
+type callHierarchySymbol struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Detail string `json:"detail,omitempty"`
+	File   string `json:"file"`
+	Line   int    `json:"line"`
+	Column int    `json:"column"`
+}
+
+type hierarchyCall struct {
+	Symbol    callHierarchySymbol `json:"symbol"`
+	CallSites []location          `json:"call_sites"`
+}
+
+type callHierarchyRoot struct {
+	Symbol callHierarchySymbol `json:"symbol"`
+	Calls  []hierarchyCall     `json:"calls"`
+}
+
+type callHierarchyOutput struct {
+	Roots []callHierarchyRoot `json:"roots"`
+}
+
 func (e *editor) getDefinition(
 	ctx context.Context, _ *mcp.CallToolRequest, in position,
 ) (*mcp.CallToolResult, locationsOutput, error) {
@@ -244,6 +277,27 @@ func (e *editor) signatureHelp(
 		return nil, signatureHelpOutput{}, err
 	}
 	return nil, toSignatureHelpOutput(help), nil
+}
+
+func (e *editor) getCallHierarchy(
+	ctx context.Context, _ *mcp.CallToolRequest, in callHierarchyInput,
+) (*mcp.CallToolResult, callHierarchyOutput, error) {
+	if in.Direction != "incoming" && in.Direction != "outgoing" {
+		return nil, callHierarchyOutput{}, fmt.Errorf(
+			"direction must be incoming or outgoing, got %q", in.Direction)
+	}
+
+	name, err := e.resolveTarget(in.position)
+	if err != nil {
+		return nil, callHierarchyOutput{}, err
+	}
+
+	hierarchies, err := e.manager.CallHierarchy(
+		ctx, name, in.File, in.Line, in.Column, in.Direction)
+	if err != nil {
+		return nil, callHierarchyOutput{}, err
+	}
+	return nil, toCallHierarchyOutput(hierarchies), nil
 }
 
 func (e *editor) getDiagnostics(
@@ -340,6 +394,35 @@ func toSignatureHelpOutput(help lsp.SignatureHelp) signatureHelpOutput {
 		}
 	}
 	return out
+}
+
+func toCallHierarchyOutput(hierarchies []lsp.CallHierarchy) callHierarchyOutput {
+	out := callHierarchyOutput{Roots: make([]callHierarchyRoot, len(hierarchies))}
+	for rootIndex, hierarchy := range hierarchies {
+		calls := make([]hierarchyCall, len(hierarchy.Calls))
+		for callIndex, callResult := range hierarchy.Calls {
+			sites := make([]location, len(callResult.CallSites))
+			for siteIndex, site := range callResult.CallSites {
+				sites[siteIndex] = location{File: site.File, Line: site.Line, Column: site.Column}
+			}
+			calls[callIndex] = hierarchyCall{
+				Symbol:    toCallHierarchySymbol(callResult.Symbol),
+				CallSites: sites,
+			}
+		}
+		out.Roots[rootIndex] = callHierarchyRoot{
+			Symbol: toCallHierarchySymbol(hierarchy.Symbol),
+			Calls:  calls,
+		}
+	}
+	return out
+}
+
+func toCallHierarchySymbol(symbol lsp.Symbol) callHierarchySymbol {
+	return callHierarchySymbol{
+		Name: symbol.Name, Kind: symbol.Kind, Detail: symbol.Detail,
+		File: symbol.Location.File, Line: symbol.Location.Line, Column: symbol.Location.Column,
+	}
 }
 
 func toEditsOutput(edits []lsp.Edit) editsOutput {
