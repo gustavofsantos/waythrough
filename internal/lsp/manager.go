@@ -1476,7 +1476,7 @@ func (p *serverProcess) callHierarchyAttempt(name string) (serverAttempt, error)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.status != StatusReady || p.retiring || p.server == nil {
+	if p.status != StatusReady || p.retiring || p.shuttingDown || p.server == nil {
 		return serverAttempt{}, fmt.Errorf(
 			"language server %q restarted while this call was in flight", name)
 	}
@@ -1510,7 +1510,7 @@ func (p *serverProcess) validateCallHierarchyAttempt(
 
 // attemptIsCurrent is called only while p.mu is held.
 func (p *serverProcess) attemptIsCurrent(attempt serverAttempt) bool {
-	return p.status == StatusReady && !p.retiring &&
+	return p.status == StatusReady && !p.retiring && !p.shuttingDown &&
 		p.generation == attempt.generation && p.server == attempt.server
 }
 
@@ -1635,11 +1635,14 @@ func (p *serverProcess) endSupervision() {
 func (p *serverProcess) requestRestart(generation int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if generation != p.generation {
+		return
+	}
 	select {
 	case p.restartCh <- struct{}{}:
 	default:
 	}
-	if generation == p.generation && p.cmd != nil {
+	if p.cmd != nil {
 		p.retiring = true
 	}
 }
@@ -1967,6 +1970,7 @@ func (p *serverProcess) shutdown(ctx context.Context, killGrace time.Duration) {
 	p.mu.Lock()
 	firstCall := !p.shuttingDown
 	p.shuttingDown = true
+	p.retiring = true
 	generation := p.generation
 	supervised := p.supervised
 	if firstCall {

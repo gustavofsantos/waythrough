@@ -75,6 +75,31 @@ func markerExists(path string) bool {
 // one that arrives second meets an attempt that ends its own process.
 // Neither order can leave a subprocess running after the shutdown returns.
 var _ = Describe("an attempt that races the shutdown of its server", func() {
+	It("retires an accepted call-hierarchy token when shutdown begins", func() {
+		proc := newAttemptTracker(config.ReadinessHandshake)
+		generation, spawning := proc.beginAttempt()
+		Expect(spawning).To(BeTrue())
+
+		server := &failingDirectedBatchServer{}
+		proc.mu.Lock()
+		proc.server = server
+		proc.status = StatusReady
+		proc.capabilities.CallHierarchyProvider = protocol.Boolean(true)
+		proc.mu.Unlock()
+
+		attempt, err := proc.callHierarchyAttempt("fake")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(attempt.generation).To(Equal(generation))
+
+		proc.shutdown(context.Background(), time.Second)
+
+		Expect(proc.validateCallHierarchyAttempt("fake", attempt)).To(
+			MatchError(ContainSubstring("restarted while this call was in flight")))
+		_, err = proc.callHierarchyAttempt("fake")
+		Expect(err).To(MatchError(
+			ContainSubstring("restarted while this call was in flight")))
+	})
+
 	It("starts no further attempt once the shutdown has begun", func() {
 		proc := newAttemptTracker(config.ReadinessHandshake)
 
@@ -108,6 +133,19 @@ var _ = Describe("an attempt that races the shutdown of its server", func() {
 		Consistently(markerExists).WithArguments(marker).
 			WithTimeout(3*survivalMarker).Should(BeFalse(),
 			"the spawn no one could see must have ended the process it started")
+	})
+})
+
+var _ = Describe("a restart request for an attempt the server already replaced", func() {
+	It("does not classify the replacement's next exit as an explicit restart", func() {
+		proc := newAttemptTracker(config.ReadinessHandshake)
+		retired, current := retiredAndCurrent(proc)
+		Expect(current).NotTo(Equal(retired))
+
+		proc.requestRestart(retired)
+
+		Expect(proc.takeRestartRequest()).To(BeFalse(),
+			"a stale request must not forgive the current attempt's next crash")
 	})
 })
 
