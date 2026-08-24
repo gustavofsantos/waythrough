@@ -125,7 +125,10 @@ func main() {
 	syncLogFile = openLog("sync-log", *syncLog)
 	requestLogFile = openLog("request-log", *requestLog)
 	maxDirectedLog = openLog("max-directed-concurrency-log", *maxDirectedConcurrencyLog)
+	serveRequests()
+}
 
+func serveRequests() {
 	r := bufio.NewReader(os.Stdin)
 	for {
 		msg, err := readMessage(r)

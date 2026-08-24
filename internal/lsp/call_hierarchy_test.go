@@ -279,7 +279,8 @@ var _ = Describe("call hierarchy", func() {
 			restartResult := make(chan error, 1)
 			go func() { restartResult <- manager.Restart(ctx, "fake") }()
 			Eventually(func() []string { return logLines(requestLog) }).Should(
-				ContainElement("shutdown"), "restart must begin before the directed response returns")
+				ContainElement("shutdown"),
+				"restart must begin before the directed response returns")
 
 			Eventually(hierarchyResult).Should(Receive(MatchError(
 				ContainSubstring("restarted while this call was in flight"))))

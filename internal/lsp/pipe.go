@@ -79,7 +79,10 @@ func (c *boundedLSPConnection) Read(destination []byte) (int, error) {
 	}
 	count, err := c.reader.Read(destination)
 	c.bodyBytesLeft -= count
-	return count, err
+	if err != nil {
+		return count, fmt.Errorf("read LSP body: %w", err)
+	}
+	return count, nil
 }
 
 func (c *boundedLSPConnection) readHeader() error {
@@ -143,7 +146,7 @@ func (c *boundedLSPConnection) readHeaderLine() ([]byte, error) {
 			}
 			return nil, io.ErrUnexpectedEOF
 		default:
-			return nil, err
+			return nil, fmt.Errorf("read LSP header: %w", err)
 		}
 	}
 }

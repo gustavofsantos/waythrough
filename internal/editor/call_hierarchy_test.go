@@ -401,7 +401,8 @@ var _ = Describe("get_call_hierarchy", func() {
 			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring(
-				`incoming call sites for root "root-00" would raise total to 16385; maximum is 16384`))
+				`incoming call sites for root "root-00" would raise total to 16385; ` +
+					`maximum is 16384`))
 		})
 	})
 
@@ -434,7 +435,8 @@ var _ = Describe("get_call_hierarchy", func() {
 			result := callHierarchyTool(ctx, session, 1, "outgoing")
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring(
-				`outgoing call sites for root "root-00" would raise total to 16385; maximum is 16384`))
+				`outgoing call sites for root "root-00" would raise total to 16385; ` +
+					`maximum is 16384`))
 		})
 	})
 

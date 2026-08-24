@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -38,7 +39,7 @@ func (s *failingDirectedBatchServer) IncomingCalls(
 	s.mu.Lock()
 	s.canceled++
 	s.mu.Unlock()
-	return nil, ctx.Err()
+	return nil, fmt.Errorf("wait for batch cancellation: %w", ctx.Err())
 }
 
 func TestDirectedCallBatchCancelsEveryPeerAfterFailure(t *testing.T) {
