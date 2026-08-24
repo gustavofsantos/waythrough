@@ -125,6 +125,24 @@ A binary from the `go` backend reports its version as `dev`, because
 `go install` does not apply the version flag that the release build
 sets. Prefer the `github` backend when the version matters.
 
+### From source
+
+This path needs the Go toolchain, at the version in [go.mod](go.mod),
+and GNU Make:
+
+```sh
+git clone https://github.com/gustavofsantos/waythrough
+cd waythrough
+make install
+```
+
+`make install` compiles the checkout, installs the binary with
+`go install`, stamps the version from `git describe`, and then checks
+that the `waythrough` your shell finds is the binary it just installed,
+rather than an older copy from another installer. Run `make` with no
+target to list the rest, or see
+[CONTRIBUTING.md](CONTRIBUTING.md#dogfood-your-change).
+
 ## Quick start
 
 1. Install the language server for the code you work on. Waythrough has

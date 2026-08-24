@@ -32,16 +32,63 @@ GitButler's hook.
 
 ## Build
 
+The [Makefile](Makefile) wraps the commands in this guide. Run `make`
+with no target to list them.
+
+Compile every package:
+
 ```sh
 go build ./...
 ```
+
+Build a `./waythrough` binary in the repo root:
+
+```sh
+make build
+```
+
+## Dogfood your change
+
+To point your own coding agent at the Waythrough in your working tree,
+install it:
+
+```sh
+make install
+```
+
+This target compiles the current tree, installs the binary with
+`go install`, and then checks two things a plain `go install` does not:
+
+- The installed binary reports the version this tree stamps into it.
+  `make install` stamps the output of `git describe`, such as
+  `v0.1.0-3-g3418ff8-dirty`, so two different working trees never
+  produce the same version string. A plain `go install` leaves the
+  version at `dev`, which reads the same before and after an upgrade.
+- The `waythrough` your shell finds is the binary it just installed. A
+  copy from Homebrew or from mise, earlier in `PATH`, otherwise keeps
+  answering, and every install looks stuck on the first version you
+  installed.
+
+The target fails, and names the file that wins, when either check does
+not hold. `make doctor` prints that same picture at any time, and
+`make uninstall` removes the binary the target installed.
+
+`go install` writes to `GOBIN`, or to the first `GOPATH` entry's `bin`
+directory. Name a different directory to install somewhere else:
+
+```sh
+make install INSTALL_DIR="$HOME/.local/bin"
+```
+
+An agent that already holds an MCP session keeps the old process
+running. Restart the agent after an install.
 
 ## Check your change
 
 `scripts/check.sh` is the single source of truth for validation. The
 pre-commit hook, the pre-push hook, and GitHub Actions all run this
 same script. A passing local run and a passing CI run never disagree.
-Run it yourself at any time:
+Run it yourself at any time, either directly or through `make check`:
 
 ```sh
 ./scripts/check.sh
