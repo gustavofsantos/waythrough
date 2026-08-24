@@ -613,14 +613,15 @@ func (m *Manager) SignatureHelp(
 	return signatureHelpFromProtocol(result)
 }
 
-// CallHierarchy asks the named server for the direct incoming calls of every
-// symbol prepared at a 1-based position. The prepared item is sent back
+// CallHierarchy asks the named server for the direct calls in direction from
+// every symbol prepared at a 1-based position. The prepared item is sent back
 // verbatim because its Data field belongs to the language server.
 func (m *Manager) CallHierarchy(
 	ctx context.Context, name, file string, line, column int, direction string,
 ) ([]CallHierarchy, error) {
-	if direction != "incoming" {
-		return nil, fmt.Errorf("call hierarchy direction must be incoming, got %q", direction)
+	if direction != "incoming" && direction != "outgoing" {
+		return nil, fmt.Errorf(
+			"call hierarchy direction must be incoming or outgoing, got %q", direction)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, m.toolCallTimeout)
@@ -649,13 +650,24 @@ func (m *Manager) CallHierarchy(
 
 	hierarchies := make([]CallHierarchy, len(items))
 	for index, item := range items {
-		calls, err := server.IncomingCalls(ctx, &protocol.CallHierarchyIncomingCallsParams{
-			Item: item,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
+		switch direction {
+		case "incoming":
+			calls, err := server.IncomingCalls(ctx, &protocol.CallHierarchyIncomingCallsParams{
+				Item: item,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
+			}
+			hierarchies[index] = incomingCallHierarchy(item, calls)
+		case "outgoing":
+			calls, err := server.OutgoingCalls(ctx, &protocol.CallHierarchyOutgoingCallsParams{
+				Item: item,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("outgoing calls for %q: %w", item.Name, err)
+			}
+			hierarchies[index] = outgoingCallHierarchy(item, calls)
 		}
-		hierarchies[index] = incomingCallHierarchy(item, calls)
 	}
 	return hierarchies, nil
 }
@@ -764,6 +776,26 @@ func incomingCallHierarchy(
 		}
 		hierarchy.Calls[index] = Call{
 			Symbol:    callHierarchySymbol(call.From),
+			CallSites: sites,
+		}
+	}
+	return hierarchy
+}
+
+func outgoingCallHierarchy(
+	root protocol.CallHierarchyItem, outgoing []protocol.CallHierarchyOutgoingCall,
+) CallHierarchy {
+	hierarchy := CallHierarchy{
+		Symbol: callHierarchySymbol(root),
+		Calls:  make([]Call, len(outgoing)),
+	}
+	for index, call := range outgoing {
+		sites := make([]Location, len(call.FromRanges))
+		for siteIndex, callSite := range call.FromRanges {
+			sites[siteIndex] = locationFromRange(root.URI, callSite)
+		}
+		hierarchy.Calls[index] = Call{
+			Symbol:    callHierarchySymbol(call.To),
 			CallSites: sites,
 		}
 	}

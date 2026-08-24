@@ -53,6 +53,7 @@ var (
 	callHierarchy      = flag.Bool("call-hierarchy", false, "advertise callHierarchyProvider in the initialize result")
 	callHierarchyRoots = flag.String("call-hierarchy-roots", "", "raw JSON result to answer textDocument/prepareCallHierarchy with; empty means no prepared roots")
 	incomingCalls      = flag.String("incoming-calls", "", "raw JSON result to answer callHierarchy/incomingCalls with; empty means no incoming calls")
+	outgoingCalls      = flag.String("outgoing-calls", "", "raw JSON result to answer callHierarchy/outgoingCalls with; empty means no outgoing calls")
 	pullDiagnostics    = flag.Bool("pull-diagnostics", false, "advertise diagnosticProvider in the initialize result, the capability a client must see before it may ask for diagnostics")
 	diagnostics        = flag.String("diagnostics", "", "raw JSON result to answer textDocument/diagnostic with, in the same spirit as -signature-help; empty means a full report holding no diagnostics, which is what a clean file gets")
 	requestLog         = flag.String("request-log", "", "path to a file that receives the method name of every request and notification handled, one per line — lets a test assert Waythrough never sent a request at all, not merely that it disliked the answer")
@@ -136,6 +137,8 @@ func main() {
 			handlePrepareCallHierarchy(msg)
 		case "callHierarchy/incomingCalls":
 			handleIncomingCalls(msg)
+		case "callHierarchy/outgoingCalls":
+			handleOutgoingCalls(msg)
 		case "textDocument/diagnostic":
 			handleDiagnostic(msg)
 		}
@@ -393,6 +396,14 @@ func handleIncomingCalls(msg message) {
 		return
 	}
 	respond(msg.ID, *incomingCalls)
+}
+
+func handleOutgoingCalls(msg message) {
+	if *outgoingCalls == "" {
+		respond(msg.ID, "[]")
+		return
+	}
+	respond(msg.ID, *outgoingCalls)
 }
 
 // handleDiagnostic answers textDocument/diagnostic. Like handleDefinition,
