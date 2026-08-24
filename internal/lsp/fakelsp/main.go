@@ -64,6 +64,7 @@ var (
 	callHierarchyErrorAfter   = flag.Int("call-hierarchy-error-after", -1, "0-based directed call request index to fail; negative means every directed request succeeds")
 	callHierarchyRequiredData = flag.String("call-hierarchy-required-data", "", "raw JSON data that every directed call item must preserve; empty skips the check")
 	callHierarchyDelay        = flag.Duration("call-hierarchy-delay", 0, "delay every directed call response, to test the operation deadline")
+	callHierarchyAsync        = flag.Bool("call-hierarchy-async", false, "handle directed call requests concurrently with lifecycle requests")
 	pullDiagnostics           = flag.Bool("pull-diagnostics", false, "advertise diagnosticProvider in the initialize result, the capability a client must see before it may ask for diagnostics")
 	diagnostics               = flag.String("diagnostics", "", "raw JSON result to answer textDocument/diagnostic with, in the same spirit as -signature-help; empty means a full report holding no diagnostics, which is what a clean file gets")
 	requestLog                = flag.String("request-log", "", "path to a file that receives the method name of every request and notification handled, one per line — lets a test assert Waythrough never sent a request at all, not merely that it disliked the answer")
@@ -151,9 +152,17 @@ func main() {
 		case "textDocument/prepareCallHierarchy":
 			handlePrepareCallHierarchy(msg)
 		case "callHierarchy/incomingCalls":
-			handleIncomingCalls(msg)
+			if *callHierarchyAsync {
+				go handleIncomingCalls(msg)
+			} else {
+				handleIncomingCalls(msg)
+			}
 		case "callHierarchy/outgoingCalls":
-			handleOutgoingCalls(msg)
+			if *callHierarchyAsync {
+				go handleOutgoingCalls(msg)
+			} else {
+				handleOutgoingCalls(msg)
+			}
 		case "textDocument/diagnostic":
 			handleDiagnostic(msg)
 		}

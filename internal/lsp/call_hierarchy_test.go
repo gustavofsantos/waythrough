@@ -213,4 +213,48 @@ var _ = Describe("call hierarchy", func() {
 			Expect(err).To(MatchError(ContainSubstring("deadline exceeded")))
 		})
 	})
+
+	When("a restart begins while a directed response is in flight", func() {
+		It("rejects the response from the retiring server attempt", func() {
+			requestLog := filepath.Join(GinkgoT().TempDir(), "requests.log")
+			root := GinkgoT().TempDir()
+			file := filepath.Join(root, "main.fake")
+			Expect(os.WriteFile(file, []byte("target()"), 0o644)).To(Succeed())
+			entry := fakeEntry(
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+`[{
+					"name":"target","kind":12,"uri":"file:///root/main.fake",
+					"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},
+					"selectionRange":{
+						"start":{"line":0,"character":0},
+						"end":{"line":0,"character":1}
+					}
+				}]`,
+				"-call-hierarchy-async",
+				"-call-hierarchy-delay=50ms",
+				"-ignore-exit",
+				"-request-log="+requestLog)
+			manager := lsp.NewManager(root, []config.LanguageServer{entry},
+				lsp.WithShutdownGrace(200*time.Millisecond))
+			Expect(manager.Start(ctx)).To(Succeed())
+			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
+
+			hierarchyResult := make(chan error, 1)
+			go func() {
+				_, err := manager.CallHierarchy(ctx, "fake", file, 1, 1, "incoming")
+				hierarchyResult <- err
+			}()
+			Eventually(func() []string { return logLines(requestLog) }).Should(
+				ContainElement("callHierarchy/incomingCalls"))
+
+			restartResult := make(chan error, 1)
+			go func() { restartResult <- manager.Restart(ctx, "fake") }()
+			Eventually(func() []string { return logLines(requestLog) }).Should(
+				ContainElement("shutdown"), "restart must begin before the directed response returns")
+
+			Eventually(hierarchyResult).Should(Receive(MatchError(
+				ContainSubstring("restarted while this call was in flight"))))
+			Eventually(restartResult).Should(Receive(Succeed()))
+		})
+	})
 })

@@ -454,7 +454,7 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	m.logger.Debug("restarting language server",
 		slog.String("server", name),
 		slog.Int("retired_attempt", retired))
-	proc.requestRestart()
+	proc.requestRestart(retired)
 	proc.stopAttempt(ctx, m.shutdownGrace, retired)
 	return m.waitReady(ctx, name, m.toolCallTimeout, retired)
 }
@@ -628,33 +628,30 @@ func (m *Manager) CallHierarchy(
 	ctx, cancel := context.WithTimeout(ctx, m.toolCallTimeout)
 	defer cancel()
 
-	proc, path, err := m.prepare(ctx, name, file)
+	proc, err := m.serverNamed(name)
 	if err != nil {
 		return nil, err
 	}
-	server, err := proc.callHierarchyServer(name)
+	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
+		return nil, err
+	}
+	attempt, err := proc.callHierarchyAttempt(name)
 	if err != nil {
 		return nil, err
 	}
-	// prepare synced the attempt that was current at that time. Sync once more
-	// after capturing the capability-validated server, then prove the same
-	// attempt is still current before sending the hierarchy request.
-	if err := proc.syncFile(ctx, path); err != nil {
-		return nil, fmt.Errorf("resync call hierarchy file: %w", err)
-	}
-	current, err := proc.callHierarchyServer(name)
-	if err != nil {
-		return nil, err
-	}
-	if current != server {
-		return nil, fmt.Errorf("language server %q restarted while this call was in flight", name)
+	path := m.resolvePath(file)
+	if err := proc.syncFileOnAttempt(ctx, path, attempt); err != nil {
+		return nil, fmt.Errorf("sync call hierarchy file: %w", err)
 	}
 
-	items, err := server.PrepareCallHierarchy(ctx, &protocol.CallHierarchyPrepareParams{
+	items, err := attempt.server.PrepareCallHierarchy(ctx, &protocol.CallHierarchyPrepareParams{
 		TextDocumentPositionParams: textDocumentPosition(path, line, column),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prepare call hierarchy: %w", err)
+	}
+	if err := proc.validateCallHierarchyAttempt(name, attempt); err != nil {
+		return nil, err
 	}
 	if len(items) > maxCallHierarchyRoots {
 		return nil, fmt.Errorf(
@@ -670,8 +667,15 @@ func (m *Manager) CallHierarchy(
 	hierarchies := make([]CallHierarchy, len(items))
 	budget := callHierarchyBudget{}
 	for index, item := range items {
-		hierarchy, err := directedCallHierarchy(ctx, server, item, direction, &budget)
+		if err := proc.validateCallHierarchyAttempt(name, attempt); err != nil {
+			return nil, err
+		}
+		hierarchy, err := directedCallHierarchy(
+			ctx, attempt.server, item, direction, &budget)
 		if err != nil {
+			return nil, err
+		}
+		if err := proc.validateCallHierarchyAttempt(name, attempt); err != nil {
 			return nil, err
 		}
 		hierarchies[index] = hierarchy
@@ -682,6 +686,9 @@ func (m *Manager) CallHierarchy(
 	sort.Slice(hierarchies, func(left, right int) bool {
 		return callHierarchyLess(hierarchies[left], hierarchies[right])
 	})
+	if err := proc.validateCallHierarchyAttempt(name, attempt); err != nil {
+		return nil, err
+	}
 	return hierarchies, nil
 }
 
@@ -1304,9 +1311,18 @@ type serverProcess struct {
 	exitedCh     chan struct{}
 	active       map[string]bool
 	everSawToken bool
+	retiring     bool
 	shuttingDown bool
 	supervised   chan struct{}
 	openFiles    map[string]openFile
+}
+
+// serverAttempt identifies one concrete LSP connection. A generation alone
+// cannot prove identity while a replacement is published, and a connection
+// alone cannot say whether its retirement has begun.
+type serverAttempt struct {
+	generation int
+	server     protocol.Server
 }
 
 // attemptState is what a waiter needs to know about a server at one
@@ -1358,15 +1374,16 @@ func (p *serverProcess) requirePullDiagnostics(name string) error {
 	return nil
 }
 
-// callHierarchyServer returns the server in the same lock hold that validates
-// its status and capability. A concurrent restart can retire that server, but
-// it cannot redirect this operation to an unvalidated replacement.
-func (p *serverProcess) callHierarchyServer(name string) (protocol.Server, error) {
+// callHierarchyAttempt captures the connection in the same lock hold that
+// validates its status and capability. Every later hierarchy step validates
+// this token again, so retirement cannot turn a stale response into success.
+func (p *serverProcess) callHierarchyAttempt(name string) (serverAttempt, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.status != StatusReady {
-		return nil, fmt.Errorf("language server %q restarted while this call was in flight", name)
+	if p.status != StatusReady || p.retiring || p.server == nil {
+		return serverAttempt{}, fmt.Errorf(
+			"language server %q restarted while this call was in flight", name)
 	}
 
 	supported := false
@@ -1379,9 +1396,27 @@ func (p *serverProcess) callHierarchyServer(name string) (protocol.Server, error
 		supported = provider != nil
 	}
 	if !supported {
-		return nil, fmt.Errorf("language server %q does not support call hierarchy", name)
+		return serverAttempt{}, fmt.Errorf(
+			"language server %q does not support call hierarchy", name)
 	}
-	return p.server, nil
+	return serverAttempt{generation: p.generation, server: p.server}, nil
+}
+
+func (p *serverProcess) validateCallHierarchyAttempt(
+	name string, attempt serverAttempt,
+) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.attemptIsCurrent(attempt) {
+		return fmt.Errorf("language server %q restarted while this call was in flight", name)
+	}
+	return nil
+}
+
+// attemptIsCurrent is called only while p.mu is held.
+func (p *serverProcess) attemptIsCurrent(attempt serverAttempt) bool {
+	return p.status == StatusReady && !p.retiring &&
+		p.generation == attempt.generation && p.server == attempt.server
 }
 
 // syncFile tells the language server about path's current on-disk content:
@@ -1389,6 +1424,19 @@ func (p *serverProcess) callHierarchyServer(name string) (protocol.Server, error
 // the last sync. A tool call always reads disk fresh, so a coding agent's
 // unsaved edits are invisible to Waythrough by design.
 func (p *serverProcess) syncFile(ctx context.Context, path string) error {
+	p.mu.Lock()
+	if p.status != StatusReady || p.retiring || p.server == nil {
+		p.mu.Unlock()
+		return fmt.Errorf("language server restarted while syncing %s", path)
+	}
+	attempt := serverAttempt{generation: p.generation, server: p.server}
+	p.mu.Unlock()
+	return p.syncFileOnAttempt(ctx, path, attempt)
+}
+
+func (p *serverProcess) syncFileOnAttempt(
+	ctx context.Context, path string, attempt serverAttempt,
+) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
@@ -1402,12 +1450,10 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 	}
 
 	p.mu.Lock()
-	if p.status != StatusReady || p.server == nil {
+	if !p.attemptIsCurrent(attempt) {
 		p.mu.Unlock()
 		return fmt.Errorf("language server restarted while syncing %s", path)
 	}
-	server := p.server
-	generation := p.generation
 	prev, wasOpen := p.openFiles[path]
 	p.mu.Unlock()
 
@@ -1417,7 +1463,7 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 	// path but not a cause, so one shared wrap would label a failed didOpen
 	// as a didChange, and vice versa.
 	if !wasOpen {
-		err = server.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
+		err = attempt.server.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
 			TextDocument: protocol.TextDocumentItem{
 				URI:        docURI,
 				LanguageID: protocol.LanguageKind(languageID),
@@ -1432,7 +1478,7 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 	} else if prev.content != text {
 		prev.version++
 		prev.content = text
-		err = server.DidChange(ctx, &protocol.DidChangeTextDocumentParams{
+		err = attempt.server.DidChange(ctx, &protocol.DidChangeTextDocumentParams{
 			TextDocument: protocol.VersionedTextDocumentIdentifier{
 				TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: docURI},
 				Version:                prev.version,
@@ -1447,7 +1493,7 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 	}
 
 	p.mu.Lock()
-	if p.generation != generation || p.server != server {
+	if !p.attemptIsCurrent(attempt) {
 		p.mu.Unlock()
 		return fmt.Errorf("language server restarted while syncing %s", path)
 	}
@@ -1488,11 +1534,18 @@ func (p *serverProcess) endSupervision() {
 // requestRestart asks the supervisor for a fresh attempt that does not
 // spend the crash budget. The channel holds one request: a second request
 // that arrives before the supervisor takes the first asks for the same
-// thing, so dropping it costs nothing.
-func (p *serverProcess) requestRestart() {
+// thing, so dropping it costs nothing. The same lock hold marks the current
+// attempt retiring, so no in-flight operation can accept a later response in
+// the gap between queuing the restart and sending shutdown.
+func (p *serverProcess) requestRestart(generation int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	select {
 	case p.restartCh <- struct{}{}:
 	default:
+	}
+	if generation == p.generation && p.cmd != nil {
+		p.retiring = true
 	}
 }
 
@@ -1557,6 +1610,7 @@ func (p *serverProcess) beginAttempt() (int, bool) {
 	p.exitedCh = make(chan struct{})
 	p.active = nil
 	p.everSawToken = false
+	p.retiring = false
 	p.openFiles = nil
 	p.capabilities = protocol.ServerCapabilities{}
 	p.status = StatusStarting
@@ -1843,18 +1897,19 @@ func (p *serverProcess) stopAttempt(
 	ctx context.Context, killGrace time.Duration, generation int,
 ) {
 	p.mu.Lock()
-	current := p.generation
+	if generation != p.generation {
+		p.mu.Unlock()
+		return
+	}
 	cmd := p.cmd
+	if cmd == nil {
+		p.mu.Unlock()
+		return
+	}
+	p.retiring = true
 	server := p.server
 	exited := p.exitedCh
 	p.mu.Unlock()
-
-	if generation != current {
-		return
-	}
-	if cmd == nil {
-		return
-	}
 
 	select {
 	case <-exited:
