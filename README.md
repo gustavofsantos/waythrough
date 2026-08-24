@@ -160,17 +160,24 @@ sets. Prefer the `github` backend when the version matters.
    Waythrough forwards the request to that file type's server.
 
 3. Tell your agent to use the tools. An agent that does not know they
-   exist keeps searching for text. `waythrough instructions` prints a
-   short block for the rules file your agent already reads, so append it
-   there:
+   exist keeps searching for text. `waythrough instructions` writes a
+   short block into the rules file your agent already reads:
 
    ```sh
-   waythrough instructions >> AGENTS.md
+   waythrough instructions --write AGENTS.md
    ```
 
    Use `CLAUDE.md`, `.cursor/rules/waythrough.md`, or whatever your tool
-   reads in place of `AGENTS.md`. The block names every tool below and
-   nothing else, so re-run it after an upgrade to pick up new tools.
+   reads in place of `AGENTS.md`. Waythrough appends the block the first
+   time and replaces it every time after that, between the HTML comment
+   markers it leaves behind, so run the same command again after an
+   upgrade. It never appends a second copy, because a stale one would keep
+   advertising the tools of the version that wrote it. Everything else in
+   the file is left alone.
+
+   The block names every tool below, with the arguments each one takes,
+   and nothing else. Without `--write` the command prints it to stdout
+   instead, to read first or to place by hand.
 
 4. Add `waythrough.yaml` only when the project needs a different server,
    command, arguments, environment, readiness gate, or file mapping. The
