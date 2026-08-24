@@ -46,9 +46,10 @@ tools and check a change.
    response into the tool's output shape. LSP response frames have an 8 KiB
    header limit and a 64 MiB body limit. Call hierarchy performs one prepare
    request, then directed requests in batches of at most four for up to 16
-   prepared roots. After the server is ready, one 30-second deadline covers
-   file synchronization, prepare, and all directed requests. The result is
-   also capped at 4,096 calls and 16,384 call sites.
+   prepared roots. Each directed result has an 8 MiB decoder limit. After the
+   server is ready, one 30-second deadline covers file synchronization,
+   prepare, and all directed requests. The result is also capped at 4,096
+   calls and 16,384 call sites.
    `restart_server` is the one tool that names its language server instead,
    because it acts on a whole server rather than on a file.
 6. When `serve` exits, it shuts down every language server the

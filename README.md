@@ -235,8 +235,9 @@ Waythrough exposes these MCP tools to a connected coding agent:
   calls for the symbols at a file position. Set `direction` to
   `incoming` or `outgoing`. The tool returns each symbol and its call
   sites as 1-based file locations. It queries at most 16 prepared roots,
-  with at most four directed requests in flight. After the language server
-  is ready, the hierarchy operation has a 30-second deadline. It accepts at
+  with at most four directed requests in flight. Each directed response has
+  an 8 MiB limit. After the language server is ready, the hierarchy operation
+  has a 30-second deadline. It accepts at
   most 4,096 calls and 16,384 call sites across all roots, and returns an
   explicit error instead of a partial result. A language
   server that does not advertise call hierarchy support also returns an

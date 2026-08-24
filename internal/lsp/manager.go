@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
 
@@ -721,7 +722,7 @@ func directedCallHierarchies(
 	for start := 0; start < len(items); start += maxConcurrentCallHierarchyRequests {
 		end := min(start+maxConcurrentCallHierarchyRequests, len(items))
 		responses, err := requestDirectedCallBatch(
-			ctx, attempt.server, items[start:end], direction)
+			ctx, attempt, items[start:end], direction)
 		if err != nil {
 			return nil, err
 		}
@@ -749,7 +750,7 @@ func directedCallHierarchies(
 
 func requestDirectedCallBatch(
 	ctx context.Context,
-	server protocol.Server,
+	attempt serverAttempt,
 	items []protocol.CallHierarchyItem,
 	direction CallDirection,
 ) ([]directedCallResponse, error) {
@@ -769,7 +770,7 @@ func requestDirectedCallBatch(
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			response, err := requestDirectedCall(batchCtx, server, items[index], direction)
+			response, err := requestDirectedCall(batchCtx, attempt, items[index], direction)
 			if err != nil {
 				select {
 				case firstError <- err:
@@ -792,7 +793,7 @@ func requestDirectedCallBatch(
 
 func requestDirectedCall(
 	ctx context.Context,
-	server protocol.Server,
+	attempt serverAttempt,
 	item protocol.CallHierarchyItem,
 	direction CallDirection,
 ) (directedCallResponse, error) {
@@ -801,8 +802,7 @@ func requestDirectedCall(
 	}
 	switch direction {
 	case CallDirectionIncoming:
-		params := &protocol.CallHierarchyIncomingCallsParams{Item: item}
-		calls, err := server.IncomingCalls(ctx, params)
+		calls, err := requestIncomingCalls(ctx, attempt, item)
 		if err != nil {
 			return directedCallResponse{}, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
 		}
@@ -811,8 +811,7 @@ func requestDirectedCall(
 		}
 		return directedCallResponse{incoming: calls}, nil
 	case CallDirectionOutgoing:
-		calls, err := server.OutgoingCalls(
-			ctx, &protocol.CallHierarchyOutgoingCallsParams{Item: item})
+		calls, err := requestOutgoingCalls(ctx, attempt, item)
 		if err != nil {
 			return directedCallResponse{}, fmt.Errorf(
 				"outgoing calls for %q: %w", item.Name, err)
@@ -1399,6 +1398,7 @@ type serverProcess struct {
 	// It belongs to the attempt that spawned it, and only wait may flush it.
 	stderrLog    *serverLog
 	server       protocol.Server
+	conn         jsonrpc2.Conn
 	capabilities protocol.ServerCapabilities
 	status       Status
 	readyCh      chan struct{}
@@ -1418,6 +1418,7 @@ type serverProcess struct {
 type serverAttempt struct {
 	generation int
 	server     protocol.Server
+	conn       jsonrpc2.Conn
 }
 
 // attemptState is what a waiter needs to know about a server at one
@@ -1494,7 +1495,11 @@ func (p *serverProcess) callHierarchyAttempt(name string) (serverAttempt, error)
 		return serverAttempt{}, fmt.Errorf(
 			"language server %q does not support call hierarchy", name)
 	}
-	return serverAttempt{generation: p.generation, server: p.server}, nil
+	return serverAttempt{
+		generation: p.generation,
+		server:     p.server,
+		conn:       p.conn,
+	}, nil
 }
 
 func (p *serverProcess) validateCallHierarchyAttempt(
@@ -1702,6 +1707,7 @@ func (p *serverProcess) beginAttempt() (int, bool) {
 
 	p.generation++
 	p.cmd = nil
+	p.conn = nil
 	p.stderrLog = nil
 	p.readyCh = make(chan struct{})
 	p.retiredCh = make(chan struct{})
@@ -1753,7 +1759,8 @@ func (p *serverProcess) startProcess(ctx context.Context, generation int) error 
 	}
 
 	stream := newLSPStream(pipeRWC{ReadCloser: stdout, WriteCloser: stdin})
-	_, _, server := protocol.NewClient(ctx, &client{proc: p, generation: generation}, stream)
+	_, conn, server := protocol.NewClient(
+		ctx, &client{proc: p, generation: generation}, stream)
 
 	p.mu.Lock()
 	stopping := p.shuttingDown
@@ -1761,6 +1768,7 @@ func (p *serverProcess) startProcess(ctx context.Context, generation int) error 
 		p.cmd = cmd
 		p.stderrLog = stderrLog
 		p.server = server
+		p.conn = conn
 	}
 	p.mu.Unlock()
 

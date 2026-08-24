@@ -51,7 +51,8 @@ func TestDirectedCallBatchCancelsEveryPeerAfterFailure(t *testing.T) {
 		{Name: "peer-3"},
 	}
 
-	_, err := requestDirectedCallBatch(context.Background(), server, items, "incoming")
+	_, err := requestDirectedCallBatch(
+		context.Background(), serverAttempt{server: server}, items, "incoming")
 	if err == nil || !strings.Contains(err.Error(), "directed failure") {
 		t.Fatalf("batch error = %v", err)
 	}
