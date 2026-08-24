@@ -2,10 +2,14 @@ package lsp_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
 )
 
@@ -100,6 +104,66 @@ var _ = Describe("call hierarchy", func() {
 					CallSites: []lsp.Location{{File: "/root/main.fake", Line: 2, Column: 2}},
 				}},
 			}}))
+		})
+	})
+
+	When("the server returns callers and sites in an arbitrary order", func() {
+		It("orders calls and call sites by source location", func() {
+			manager, file := fakeManager(ctx, "target()",
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+`[{
+					"name":"target","kind":12,"uri":"file:///root/main.fake",
+					"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},
+					"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}
+				}]`,
+				"-incoming-calls="+`[
+					{"from":{"name":"caller-z","kind":12,"uri":"file:///root/z.fake","range":{"start":{"line":8,"character":0},"end":{"line":8,"character":1}},"selectionRange":{"start":{"line":8,"character":0},"end":{"line":8,"character":1}}},"fromRanges":[{"start":{"line":9,"character":4},"end":{"line":9,"character":5}},{"start":{"line":9,"character":1},"end":{"line":9,"character":2}}]},
+					{"from":{"name":"caller-a","kind":12,"uri":"file:///root/a.fake","range":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}},"selectionRange":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}}},"fromRanges":[]}
+				]`)
+
+			hierarchies, err := manager.CallHierarchy(ctx, "fake", file, 1, 1, "incoming")
+			Expect(err).NotTo(HaveOccurred())
+			Expect([]string{
+				hierarchies[0].Calls[0].Symbol.Name,
+				hierarchies[0].Calls[1].Symbol.Name,
+			}).To(Equal([]string{"caller-a", "caller-z"}))
+			Expect(hierarchies[0].Calls[1].CallSites).To(Equal([]lsp.Location{
+				{File: "/root/z.fake", Line: 10, Column: 2},
+				{File: "/root/z.fake", Line: 10, Column: 5},
+			}))
+		})
+	})
+
+	When("the server advertises call hierarchy with an options object", func() {
+		It("accepts the capability and prepares the position", func() {
+			manager, file := fakeManager(ctx, "target()", "-call-hierarchy-options")
+
+			hierarchies, err := manager.CallHierarchy(ctx, "fake", file, 1, 1, "incoming")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hierarchies).To(BeEmpty())
+		})
+	})
+
+	When("a directed request exceeds the operation deadline", func() {
+		It("cancels the hierarchy instead of waiting without a bound", func() {
+			root := GinkgoT().TempDir()
+			file := filepath.Join(root, "main.fake")
+			Expect(os.WriteFile(file, []byte("target()"), 0o644)).To(Succeed())
+			entry := fakeEntry(
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+`[{
+					"name":"target","kind":12,"uri":"file:///root/main.fake",
+					"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},
+					"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}
+				}]`,
+				"-call-hierarchy-delay=100ms")
+			manager := lsp.NewManager(root, []config.LanguageServer{entry},
+				lsp.WithToolCallTimeout(20*time.Millisecond))
+			Expect(manager.Start(ctx)).To(Succeed())
+			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
+
+			_, err := manager.CallHierarchy(ctx, "fake", file, 1, 1, "incoming")
+			Expect(err).To(MatchError(ContainSubstring("deadline exceeded")))
 		})
 	})
 })

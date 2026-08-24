@@ -647,6 +647,11 @@ func (m *Manager) CallHierarchy(
 			"prepare call hierarchy returned %d roots; maximum is %d",
 			len(items), maxCallHierarchyRoots)
 	}
+	sort.Slice(items, func(left, right int) bool {
+		leftSymbol := callHierarchySymbol(items[left])
+		rightSymbol := callHierarchySymbol(items[right])
+		return symbolLess(leftSymbol, rightSymbol)
+	})
 
 	hierarchies := make([]CallHierarchy, len(items))
 	for index, item := range items {
@@ -775,6 +780,7 @@ func incomingCallHierarchy(
 			CallSites: locationsFromRanges(call.From.URI, call.FromRanges),
 		}
 	}
+	sortCalls(hierarchy.Calls)
 	return hierarchy
 }
 
@@ -791,6 +797,7 @@ func outgoingCallHierarchy(
 			CallSites: locationsFromRanges(root.URI, call.FromRanges),
 		}
 	}
+	sortCalls(hierarchy.Calls)
 	return hierarchy
 }
 
@@ -799,7 +806,33 @@ func locationsFromRanges(docURI uri.URI, ranges []protocol.Range) []Location {
 	for index, sourceRange := range ranges {
 		locations[index] = locationFromRange(docURI, sourceRange)
 	}
+	sort.Slice(locations, func(left, right int) bool {
+		return locationLess(locations[left], locations[right])
+	})
 	return locations
+}
+
+func sortCalls(calls []Call) {
+	sort.Slice(calls, func(left, right int) bool {
+		return symbolLess(calls[left].Symbol, calls[right].Symbol)
+	})
+}
+
+func symbolLess(left, right Symbol) bool {
+	if left.Location != right.Location {
+		return locationLess(left.Location, right.Location)
+	}
+	return left.Name < right.Name
+}
+
+func locationLess(left, right Location) bool {
+	if left.File != right.File {
+		return left.File < right.File
+	}
+	if left.Line != right.Line {
+		return left.Line < right.Line
+	}
+	return left.Column < right.Column
 }
 
 func callHierarchySymbol(item protocol.CallHierarchyItem) Symbol {

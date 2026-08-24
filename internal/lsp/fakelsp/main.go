@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -28,44 +29,50 @@ type message struct {
 }
 
 var (
-	writeMu            sync.Mutex
-	out                = bufio.NewWriter(os.Stdout)
-	nextID             = 1000
-	nextIDMu           sync.Mutex
-	progress           = flag.Bool("progress", false, "report a workDoneProgress cycle for the initial load, if the client advertised support")
-	progressDelay      = flag.Duration("progress-delay", 20*time.Millisecond, "time between the progress begin and end notifications")
-	crash              = flag.Bool("crash", false, "exit(1) immediately instead of speaking the protocol, to simulate a server that fails to start")
-	crashMarker        = flag.String("crash-marker", "", "path to a marker file: crash once if it does not exist yet, then behave normally on every later run")
-	ignoreExit         = flag.Bool("ignore-exit", false, "acknowledge shutdown but never act on exit, to simulate a server that will not stop on its own")
-	definitionLine     = flag.Int("definition-line", -1, "0-based line to answer textDocument/definition with, in the requested document; negative means no definition")
-	definitionColumn   = flag.Int("definition-column", 0, "0-based character to answer textDocument/definition with")
-	referencesLine     = flag.Int("references-line", -1, "0-based line of the first canned textDocument/references location; negative means no references")
-	referencesColumn   = flag.Int("references-column", 0, "0-based character of every canned textDocument/references location")
-	referencesCount    = flag.Int("references-count", 1, "how many canned locations to answer textDocument/references with, at consecutive lines from -references-line")
-	renameLine         = flag.Int("rename-line", -1, "0-based line of the canned textDocument/rename edit in the requested document; negative means no rename")
-	renameColumn       = flag.Int("rename-column", 0, "0-based character where the canned edit in the requested document starts")
-	renameLength       = flag.Int("rename-length", 0, "number of characters the canned edit in the requested document replaces")
-	renameOtherFile    = flag.String("rename-other-file", "", "path to a second file to include a canned edit for, proving a rename can span files; empty means one edit only")
-	renameOtherLine    = flag.Int("rename-other-line", 0, "0-based line of the canned edit in -rename-other-file")
-	renameOtherCol     = flag.Int("rename-other-column", 0, "0-based character where the canned edit in -rename-other-file starts")
-	renameOtherLen     = flag.Int("rename-other-length", 0, "number of characters the canned edit in -rename-other-file replaces")
-	signatureHelp      = flag.String("signature-help", "", "raw JSON result to answer textDocument/signatureHelp with; empty means no signature help (null). A signature help result nests signatures, per-parameter labels, and two levels of active-index, so a test states the whole canned payload here rather than through one scalar flag per field")
-	callHierarchy      = flag.Bool("call-hierarchy", false, "advertise callHierarchyProvider in the initialize result")
-	callHierarchyRoots = flag.String("call-hierarchy-roots", "", "raw JSON result to answer textDocument/prepareCallHierarchy with; empty means no prepared roots")
-	incomingCalls      = flag.String("incoming-calls", "", "raw JSON result to answer callHierarchy/incomingCalls with; empty means no incoming calls")
-	outgoingCalls      = flag.String("outgoing-calls", "", "raw JSON result to answer callHierarchy/outgoingCalls with; empty means no outgoing calls")
-	pullDiagnostics    = flag.Bool("pull-diagnostics", false, "advertise diagnosticProvider in the initialize result, the capability a client must see before it may ask for diagnostics")
-	diagnostics        = flag.String("diagnostics", "", "raw JSON result to answer textDocument/diagnostic with, in the same spirit as -signature-help; empty means a full report holding no diagnostics, which is what a clean file gets")
-	requestLog         = flag.String("request-log", "", "path to a file that receives the method name of every request and notification handled, one per line — lets a test assert Waythrough never sent a request at all, not merely that it disliked the answer")
-	syncLog            = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
-	instanceLog        = flag.String("instance-log", "", "path to a file that receives this process's pid on every process start, one per line — lets a restart test read that the old process ended and that a different one now serves, which no LSP message reports")
-	stderrLine         = flag.String("stderr-line", "", "text to write to this process's own stderr at startup, followed by a newline — lets a test assert Waythrough surfaces what a language server says about itself, which no LSP message carries")
-	stderrPartial      = flag.String("stderr-partial", "", "text to write to this process's own stderr at startup with no trailing newline — the tail a server that dies mid-sentence leaves behind")
+	writeMu                   sync.Mutex
+	out                       = bufio.NewWriter(os.Stdout)
+	nextID                    = 1000
+	nextIDMu                  sync.Mutex
+	progress                  = flag.Bool("progress", false, "report a workDoneProgress cycle for the initial load, if the client advertised support")
+	progressDelay             = flag.Duration("progress-delay", 20*time.Millisecond, "time between the progress begin and end notifications")
+	crash                     = flag.Bool("crash", false, "exit(1) immediately instead of speaking the protocol, to simulate a server that fails to start")
+	crashMarker               = flag.String("crash-marker", "", "path to a marker file: crash once if it does not exist yet, then behave normally on every later run")
+	ignoreExit                = flag.Bool("ignore-exit", false, "acknowledge shutdown but never act on exit, to simulate a server that will not stop on its own")
+	definitionLine            = flag.Int("definition-line", -1, "0-based line to answer textDocument/definition with, in the requested document; negative means no definition")
+	definitionColumn          = flag.Int("definition-column", 0, "0-based character to answer textDocument/definition with")
+	referencesLine            = flag.Int("references-line", -1, "0-based line of the first canned textDocument/references location; negative means no references")
+	referencesColumn          = flag.Int("references-column", 0, "0-based character of every canned textDocument/references location")
+	referencesCount           = flag.Int("references-count", 1, "how many canned locations to answer textDocument/references with, at consecutive lines from -references-line")
+	renameLine                = flag.Int("rename-line", -1, "0-based line of the canned textDocument/rename edit in the requested document; negative means no rename")
+	renameColumn              = flag.Int("rename-column", 0, "0-based character where the canned edit in the requested document starts")
+	renameLength              = flag.Int("rename-length", 0, "number of characters the canned edit in the requested document replaces")
+	renameOtherFile           = flag.String("rename-other-file", "", "path to a second file to include a canned edit for, proving a rename can span files; empty means one edit only")
+	renameOtherLine           = flag.Int("rename-other-line", 0, "0-based line of the canned edit in -rename-other-file")
+	renameOtherCol            = flag.Int("rename-other-column", 0, "0-based character where the canned edit in -rename-other-file starts")
+	renameOtherLen            = flag.Int("rename-other-length", 0, "number of characters the canned edit in -rename-other-file replaces")
+	signatureHelp             = flag.String("signature-help", "", "raw JSON result to answer textDocument/signatureHelp with; empty means no signature help (null). A signature help result nests signatures, per-parameter labels, and two levels of active-index, so a test states the whole canned payload here rather than through one scalar flag per field")
+	callHierarchy             = flag.Bool("call-hierarchy", false, "advertise callHierarchyProvider in the initialize result")
+	callHierarchyFalse        = flag.Bool("call-hierarchy-false", false, "advertise callHierarchyProvider=false in the initialize result")
+	callHierarchyOptions      = flag.Bool("call-hierarchy-options", false, "advertise callHierarchyProvider as an options object in the initialize result")
+	callHierarchyRoots        = flag.String("call-hierarchy-roots", "", "raw JSON result to answer textDocument/prepareCallHierarchy with; empty means no prepared roots")
+	incomingCalls             = flag.String("incoming-calls", "", "raw JSON result to answer callHierarchy/incomingCalls with; empty means no incoming calls")
+	outgoingCalls             = flag.String("outgoing-calls", "", "raw JSON result to answer callHierarchy/outgoingCalls with; empty means no outgoing calls")
+	callHierarchyErrorAfter   = flag.Int("call-hierarchy-error-after", -1, "0-based directed call request index to fail; negative means every directed request succeeds")
+	callHierarchyRequiredData = flag.String("call-hierarchy-required-data", "", "raw JSON data that every directed call item must preserve; empty skips the check")
+	callHierarchyDelay        = flag.Duration("call-hierarchy-delay", 0, "delay every directed call response, to test the operation deadline")
+	pullDiagnostics           = flag.Bool("pull-diagnostics", false, "advertise diagnosticProvider in the initialize result, the capability a client must see before it may ask for diagnostics")
+	diagnostics               = flag.String("diagnostics", "", "raw JSON result to answer textDocument/diagnostic with, in the same spirit as -signature-help; empty means a full report holding no diagnostics, which is what a clean file gets")
+	requestLog                = flag.String("request-log", "", "path to a file that receives the method name of every request and notification handled, one per line — lets a test assert Waythrough never sent a request at all, not merely that it disliked the answer")
+	syncLog                   = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
+	instanceLog               = flag.String("instance-log", "", "path to a file that receives this process's pid on every process start, one per line — lets a restart test read that the old process ended and that a different one now serves, which no LSP message reports")
+	stderrLine                = flag.String("stderr-line", "", "text to write to this process's own stderr at startup, followed by a newline — lets a test assert Waythrough surfaces what a language server says about itself, which no LSP message carries")
+	stderrPartial             = flag.String("stderr-partial", "", "text to write to this process's own stderr at startup with no trailing newline — the tail a server that dies mid-sentence leaves behind")
 
 	openDocs       = map[string]bool{}
 	syncLogFile    *os.File
 	requestLogFile *os.File
 	logMu          sync.Mutex
+	directedCalls  int
 )
 
 func main() {
@@ -151,7 +158,11 @@ func handleInitialize(msg message) {
 	lastInitializeParams = msg.Params
 
 	var capabilities []string
-	if *callHierarchy {
+	if *callHierarchyFalse {
+		capabilities = append(capabilities, `"callHierarchyProvider":false`)
+	} else if *callHierarchyOptions {
+		capabilities = append(capabilities, `"callHierarchyProvider":{}`)
+	} else if *callHierarchy {
 		capabilities = append(capabilities, `"callHierarchyProvider":true`)
 	}
 	if *pullDiagnostics {
@@ -391,6 +402,9 @@ func handlePrepareCallHierarchy(msg message) {
 }
 
 func handleIncomingCalls(msg message) {
+	if !acceptDirectedCall(msg) {
+		return
+	}
 	if *incomingCalls == "" {
 		respond(msg.ID, "[]")
 		return
@@ -399,11 +413,53 @@ func handleIncomingCalls(msg message) {
 }
 
 func handleOutgoingCalls(msg message) {
+	if !acceptDirectedCall(msg) {
+		return
+	}
 	if *outgoingCalls == "" {
 		respond(msg.ID, "[]")
 		return
 	}
 	respond(msg.ID, *outgoingCalls)
+}
+
+func acceptDirectedCall(msg message) bool {
+	time.Sleep(*callHierarchyDelay)
+
+	var params struct {
+		Item struct {
+			Data json.RawMessage `json:"data"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		respondError(msg.ID, -32602, fmt.Sprintf("invalid params: %s", err))
+		return false
+	}
+	if *callHierarchyRequiredData != "" &&
+		!jsonEqual(params.Item.Data, json.RawMessage(*callHierarchyRequiredData)) {
+		respondError(msg.ID, -32602, "prepared item data was not preserved")
+		return false
+	}
+
+	requestIndex := directedCalls
+	directedCalls++
+	if requestIndex == *callHierarchyErrorAfter {
+		respondError(msg.ID, -32000, "directed call failed on purpose")
+		return false
+	}
+	return true
+}
+
+func jsonEqual(left, right json.RawMessage) bool {
+	var leftValue any
+	if err := json.Unmarshal(left, &leftValue); err != nil {
+		return false
+	}
+	var rightValue any
+	if err := json.Unmarshal(right, &rightValue); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
 }
 
 // handleDiagnostic answers textDocument/diagnostic. Like handleDefinition,
