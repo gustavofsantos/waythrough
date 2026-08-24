@@ -40,6 +40,8 @@ const (
 	maxCallHierarchySites  = 16384
 )
 
+const maxConcurrentCallHierarchyRequests = 4
+
 // Status is a language server's place in its own lifecycle.
 type Status int
 
@@ -664,21 +666,10 @@ func (m *Manager) CallHierarchy(
 		return symbolLess(leftSymbol, rightSymbol)
 	})
 
-	hierarchies := make([]CallHierarchy, len(items))
-	budget := callHierarchyBudget{}
-	for index, item := range items {
-		if err := proc.validateCallHierarchyAttempt(name, attempt); err != nil {
-			return nil, err
-		}
-		hierarchy, err := directedCallHierarchy(
-			ctx, attempt.server, item, direction, &budget)
-		if err != nil {
-			return nil, err
-		}
-		if err := proc.validateCallHierarchyAttempt(name, attempt); err != nil {
-			return nil, err
-		}
-		hierarchies[index] = hierarchy
+	hierarchies, err := directedCallHierarchies(
+		ctx, proc, name, attempt, items, direction)
+	if err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("call hierarchy: %w", err)
@@ -692,42 +683,122 @@ func (m *Manager) CallHierarchy(
 	return hierarchies, nil
 }
 
-func directedCallHierarchy(
+type directedCallResponse struct {
+	incoming []protocol.CallHierarchyIncomingCall
+	outgoing []protocol.CallHierarchyOutgoingCall
+}
+
+func directedCallHierarchies(
+	ctx context.Context,
+	proc *serverProcess,
+	name string,
+	attempt serverAttempt,
+	items []protocol.CallHierarchyItem,
+	direction string,
+) ([]CallHierarchy, error) {
+	hierarchies := make([]CallHierarchy, len(items))
+	budget := callHierarchyBudget{}
+	for start := 0; start < len(items); start += maxConcurrentCallHierarchyRequests {
+		end := min(start+maxConcurrentCallHierarchyRequests, len(items))
+		responses, err := requestDirectedCallBatch(
+			ctx, attempt.server, items[start:end], direction)
+		if err != nil {
+			return nil, err
+		}
+		if err := proc.validateCallHierarchyAttempt(name, attempt); err != nil {
+			return nil, err
+		}
+		for offset, response := range responses {
+			index := start + offset
+			item := items[index]
+			if direction == "incoming" {
+				if err := budget.acceptIncoming(item.Name, response.incoming); err != nil {
+					return nil, err
+				}
+				hierarchies[index] = incomingCallHierarchy(item, response.incoming)
+				continue
+			}
+			if err := budget.acceptOutgoing(item.Name, response.outgoing); err != nil {
+				return nil, err
+			}
+			hierarchies[index] = outgoingCallHierarchy(item, response.outgoing)
+		}
+	}
+	return hierarchies, nil
+}
+
+func requestDirectedCallBatch(
+	ctx context.Context,
+	server protocol.Server,
+	items []protocol.CallHierarchyItem,
+	direction string,
+) ([]directedCallResponse, error) {
+	if len(items) > maxConcurrentCallHierarchyRequests {
+		return nil, fmt.Errorf(
+			"directed call batch has %d roots; maximum is %d",
+			len(items), maxConcurrentCallHierarchyRequests)
+	}
+	batchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	responses := make([]directedCallResponse, len(items))
+	firstError := make(chan error, 1)
+	var wait sync.WaitGroup
+	for index := range items {
+		index := index
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			response, err := requestDirectedCall(batchCtx, server, items[index], direction)
+			if err != nil {
+				select {
+				case firstError <- err:
+					cancel()
+				default:
+				}
+				return
+			}
+			responses[index] = response
+		}()
+	}
+	wait.Wait()
+	select {
+	case err := <-firstError:
+		return nil, err
+	default:
+		return responses, nil
+	}
+}
+
+func requestDirectedCall(
 	ctx context.Context,
 	server protocol.Server,
 	item protocol.CallHierarchyItem,
 	direction string,
-	budget *callHierarchyBudget,
-) (CallHierarchy, error) {
+) (directedCallResponse, error) {
 	if err := ctx.Err(); err != nil {
-		return CallHierarchy{}, fmt.Errorf("call hierarchy: %w", err)
+		return directedCallResponse{}, fmt.Errorf("call hierarchy: %w", err)
 	}
 	if direction == "incoming" {
 		params := &protocol.CallHierarchyIncomingCallsParams{Item: item}
 		calls, err := server.IncomingCalls(ctx, params)
 		if err != nil {
-			return CallHierarchy{}, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
+			return directedCallResponse{}, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
 		}
 		if err := ctx.Err(); err != nil {
-			return CallHierarchy{}, fmt.Errorf("call hierarchy: %w", err)
+			return directedCallResponse{}, fmt.Errorf("call hierarchy: %w", err)
 		}
-		if err := budget.acceptIncoming(calls); err != nil {
-			return CallHierarchy{}, err
-		}
-		return incomingCallHierarchy(item, calls), nil
+		return directedCallResponse{incoming: calls}, nil
 	}
 
 	calls, err := server.OutgoingCalls(ctx, &protocol.CallHierarchyOutgoingCallsParams{Item: item})
 	if err != nil {
-		return CallHierarchy{}, fmt.Errorf("outgoing calls for %q: %w", item.Name, err)
+		return directedCallResponse{}, fmt.Errorf("outgoing calls for %q: %w", item.Name, err)
 	}
 	if err := ctx.Err(); err != nil {
-		return CallHierarchy{}, fmt.Errorf("call hierarchy: %w", err)
+		return directedCallResponse{}, fmt.Errorf("call hierarchy: %w", err)
 	}
-	if err := budget.acceptOutgoing(calls); err != nil {
-		return CallHierarchy{}, err
-	}
-	return outgoingCallHierarchy(item, calls), nil
+	return directedCallResponse{outgoing: calls}, nil
 }
 
 // Diagnostics asks the named server what is wrong in file, waiting for the
@@ -842,45 +913,43 @@ type callHierarchyBudget struct {
 	sites int
 }
 
-func (b *callHierarchyBudget) acceptIncoming(calls []protocol.CallHierarchyIncomingCall) error {
-	if err := b.acceptCalls(len(calls)); err != nil {
-		return err
-	}
+func (b *callHierarchyBudget) acceptIncoming(
+	root string, calls []protocol.CallHierarchyIncomingCall,
+) error {
+	sites := 0
 	for _, call := range calls {
-		if err := b.acceptSites(len(call.FromRanges)); err != nil {
-			return err
-		}
+		sites += len(call.FromRanges)
 	}
-	return nil
+	return b.accept(root, "incoming", len(calls), sites)
 }
 
-func (b *callHierarchyBudget) acceptOutgoing(calls []protocol.CallHierarchyOutgoingCall) error {
-	if err := b.acceptCalls(len(calls)); err != nil {
-		return err
-	}
+func (b *callHierarchyBudget) acceptOutgoing(
+	root string, calls []protocol.CallHierarchyOutgoingCall,
+) error {
+	sites := 0
 	for _, call := range calls {
-		if err := b.acceptSites(len(call.FromRanges)); err != nil {
-			return err
-		}
+		sites += len(call.FromRanges)
 	}
-	return nil
+	return b.accept(root, "outgoing", len(calls), sites)
 }
 
-func (b *callHierarchyBudget) acceptCalls(count int) error {
-	if count > maxCallHierarchyCalls-b.calls {
+func (b *callHierarchyBudget) accept(
+	root, direction string, calls, sites int,
+) error {
+	attemptedCalls := b.calls + calls
+	if attemptedCalls > maxCallHierarchyCalls {
 		return fmt.Errorf(
-			"call hierarchy result maximum is %d calls", maxCallHierarchyCalls)
+			"%s calls for root %q would raise total to %d; maximum is %d",
+			direction, root, attemptedCalls, maxCallHierarchyCalls)
 	}
-	b.calls += count
-	return nil
-}
-
-func (b *callHierarchyBudget) acceptSites(count int) error {
-	if count > maxCallHierarchySites-b.sites {
+	attemptedSites := b.sites + sites
+	if attemptedSites > maxCallHierarchySites {
 		return fmt.Errorf(
-			"call hierarchy result maximum is %d call sites", maxCallHierarchySites)
+			"%s call sites for root %q would raise total to %d; maximum is %d",
+			direction, root, attemptedSites, maxCallHierarchySites)
 	}
-	b.sites += count
+	b.calls = attemptedCalls
+	b.sites = attemptedSites
 	return nil
 }
 

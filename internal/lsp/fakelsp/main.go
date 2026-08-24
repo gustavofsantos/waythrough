@@ -55,6 +55,7 @@ var (
 	callHierarchyFalse        = flag.Bool("call-hierarchy-false", false, "advertise callHierarchyProvider=false in the initialize result")
 	callHierarchyOptions      = flag.Bool("call-hierarchy-options", false, "advertise callHierarchyProvider as an options object in the initialize result")
 	callHierarchyRoots        = flag.String("call-hierarchy-roots", "", "raw JSON result to answer textDocument/prepareCallHierarchy with; empty means no prepared roots")
+	callHierarchyRootsCount   = flag.Int("call-hierarchy-roots-count", 0, "number of generated call hierarchy roots; zero uses -call-hierarchy-roots")
 	incomingCalls             = flag.String("incoming-calls", "", "raw JSON result to answer callHierarchy/incomingCalls with; empty means no incoming calls")
 	incomingCallsCount        = flag.Int("incoming-calls-count", 0, "number of generated incoming calls; zero uses -incoming-calls")
 	incomingCallSitesCount    = flag.Int("incoming-call-sites-count", 0, "number of generated sites on each incoming call")
@@ -78,11 +79,19 @@ var (
 	requestLogFile *os.File
 	logMu          sync.Mutex
 	directedCalls  int
+	directedActive int
+	directedMax    int
+	directedMu     sync.Mutex
+	maxDirectedLog *os.File
 )
 
 var oversizedHierarchyResponse = flag.String(
 	"oversized-call-hierarchy-response", "",
 	"call hierarchy phase that declares a 64 MiB response without sending its body: prepare or directed")
+
+var maxDirectedConcurrencyLog = flag.String(
+	"max-directed-concurrency-log", "",
+	"path that receives each new maximum number of concurrent directed call requests")
 
 func main() {
 	flag.Parse()
@@ -114,6 +123,7 @@ func main() {
 
 	syncLogFile = openLog("sync-log", *syncLog)
 	requestLogFile = openLog("request-log", *requestLog)
+	maxDirectedLog = openLog("max-directed-concurrency-log", *maxDirectedConcurrencyLog)
 
 	r := bufio.NewReader(os.Stdin)
 	for {
@@ -416,10 +426,31 @@ func handlePrepareCallHierarchy(msg message) {
 		return
 	}
 	if *callHierarchyRoots == "" {
+		if *callHierarchyRootsCount > 0 {
+			respond(msg.ID, generatedCallHierarchyRoots(*callHierarchyRootsCount))
+			return
+		}
 		respond(msg.ID, "[]")
 		return
 	}
 	respond(msg.ID, *callHierarchyRoots)
+}
+
+func generatedCallHierarchyRoots(count int) string {
+	var roots strings.Builder
+	roots.WriteByte('[')
+	for index := 0; index < count; index++ {
+		if index > 0 {
+			roots.WriteByte(',')
+		}
+		_, _ = fmt.Fprintf(&roots,
+			`{"name":"root-%02d","kind":12,"uri":"file:///root/root-%02d.fake",`+
+				`"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},`+
+				`"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}`,
+			index, index)
+	}
+	roots.WriteByte(']')
+	return roots.String()
 }
 
 func handleIncomingCalls(msg message) {
@@ -427,6 +458,8 @@ func handleIncomingCalls(msg message) {
 		writeOversizedHierarchyHeader()
 		time.Sleep(time.Hour)
 	}
+	beginDirectedCall()
+	defer endDirectedCall()
 	if !acceptDirectedCall(msg) {
 		return
 	}
@@ -482,6 +515,8 @@ func generatedDirectedCalls(targetField string, callCount, sitesPerCall int) str
 }
 
 func handleOutgoingCalls(msg message) {
+	beginDirectedCall()
+	defer endDirectedCall()
 	if !acceptDirectedCall(msg) {
 		return
 	}
@@ -514,13 +549,34 @@ func acceptDirectedCall(msg message) bool {
 		return false
 	}
 
+	directedMu.Lock()
 	requestIndex := directedCalls
 	directedCalls++
+	directedMu.Unlock()
 	if requestIndex == *callHierarchyErrorAfter {
 		respondError(msg.ID, -32000, "directed call failed on purpose")
 		return false
 	}
 	return true
+}
+
+func beginDirectedCall() {
+	directedMu.Lock()
+	defer directedMu.Unlock()
+	directedActive++
+	if directedActive <= directedMax {
+		return
+	}
+	directedMax = directedActive
+	if maxDirectedLog != nil {
+		_, _ = fmt.Fprintln(maxDirectedLog, directedMax)
+	}
+}
+
+func endDirectedCall() {
+	directedMu.Lock()
+	directedActive--
+	directedMu.Unlock()
 }
 
 func jsonEqual(left, right json.RawMessage) bool {

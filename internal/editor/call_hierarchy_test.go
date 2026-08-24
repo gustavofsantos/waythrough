@@ -367,7 +367,23 @@ var _ = Describe("get_call_hierarchy", func() {
 
 			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeTrue())
-			Expect(errorText(result)).To(ContainSubstring("maximum is 4096 calls"))
+			Expect(errorText(result)).To(ContainSubstring(
+				`incoming calls for root "root-00" would raise total to 4097; maximum is 4096`))
+		})
+
+		It("reports the cumulative total and the root that crosses it", func() {
+			writeFile(root, "main.fake", "target()")
+			cfg := fakeConfig(
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+cannedCallHierarchyRoots(2),
+				"-incoming-calls-count=2049")
+			manager := lsp.NewManager(root, cfg.LanguageServers)
+			session := connect(ctx, manager, cfg)
+
+			result := callHierarchyTool(ctx, session, 1, "incoming")
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring(
+				`incoming calls for root "root-01" would raise total to 4098; maximum is 4096`))
 		})
 	})
 
@@ -384,7 +400,8 @@ var _ = Describe("get_call_hierarchy", func() {
 
 			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeTrue())
-			Expect(errorText(result)).To(ContainSubstring("maximum is 16384 call sites"))
+			Expect(errorText(result)).To(ContainSubstring(
+				`incoming call sites for root "root-00" would raise total to 16385; maximum is 16384`))
 		})
 	})
 
@@ -400,7 +417,8 @@ var _ = Describe("get_call_hierarchy", func() {
 
 			result := callHierarchyTool(ctx, session, 1, "outgoing")
 			Expect(result.IsError).To(BeTrue())
-			Expect(errorText(result)).To(ContainSubstring("maximum is 4096 calls"))
+			Expect(errorText(result)).To(ContainSubstring(
+				`outgoing calls for root "root-00" would raise total to 4097; maximum is 4096`))
 		})
 
 		It("rejects too many call sites", func() {
@@ -415,7 +433,8 @@ var _ = Describe("get_call_hierarchy", func() {
 
 			result := callHierarchyTool(ctx, session, 1, "outgoing")
 			Expect(result.IsError).To(BeTrue())
-			Expect(errorText(result)).To(ContainSubstring("maximum is 16384 call sites"))
+			Expect(errorText(result)).To(ContainSubstring(
+				`outgoing call sites for root "root-00" would raise total to 16385; maximum is 16384`))
 		})
 	})
 

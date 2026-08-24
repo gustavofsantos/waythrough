@@ -257,4 +257,22 @@ var _ = Describe("call hierarchy", func() {
 			Eventually(restartResult).Should(Receive(Succeed()))
 		})
 	})
+
+	When("sixteen prepared roots require directed requests", func() {
+		It("runs no more and no fewer than four requests at once", func() {
+			maxConcurrencyLog := filepath.Join(GinkgoT().TempDir(), "concurrency.log")
+			manager, file := fakeManager(ctx, "target()",
+				"-call-hierarchy",
+				"-call-hierarchy-roots-count=16",
+				"-call-hierarchy-async",
+				"-call-hierarchy-delay=50ms",
+				"-max-directed-concurrency-log="+maxConcurrencyLog)
+
+			hierarchies, err := manager.CallHierarchy(
+				ctx, "fake", file, 1, 1, "incoming")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hierarchies).To(HaveLen(16))
+			Expect(logLines(maxConcurrencyLog)).To(Equal([]string{"1", "2", "3", "4"}))
+		})
+	})
 })
