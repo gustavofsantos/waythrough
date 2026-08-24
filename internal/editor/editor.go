@@ -282,7 +282,13 @@ func (e *editor) signatureHelp(
 func (e *editor) getCallHierarchy(
 	ctx context.Context, _ *mcp.CallToolRequest, in callHierarchyInput,
 ) (*mcp.CallToolResult, callHierarchyOutput, error) {
-	if in.Direction != "incoming" && in.Direction != "outgoing" {
+	var direction lsp.CallDirection
+	switch in.Direction {
+	case "incoming":
+		direction = lsp.CallDirectionIncoming
+	case "outgoing":
+		direction = lsp.CallDirectionOutgoing
+	default:
 		return nil, callHierarchyOutput{}, fmt.Errorf(
 			"direction must be incoming or outgoing, got %q", in.Direction)
 	}
@@ -293,7 +299,7 @@ func (e *editor) getCallHierarchy(
 	}
 
 	hierarchies, err := e.manager.CallHierarchy(
-		ctx, name, in.File, in.Line, in.Column, in.Direction)
+		ctx, name, in.File, in.Line, in.Column, direction)
 	if err != nil {
 		return nil, callHierarchyOutput{}, err
 	}

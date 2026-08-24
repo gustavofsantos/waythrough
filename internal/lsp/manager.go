@@ -31,13 +31,14 @@ import (
 const defaultProgressDebounce = 250 * time.Millisecond
 
 const (
-	defaultRestartLimit    = 3
-	defaultRestartWindow   = 60 * time.Second
-	defaultShutdownGrace   = 5 * time.Second
-	defaultToolCallTimeout = 30 * time.Second
-	maxCallHierarchyRoots  = 16
-	maxCallHierarchyCalls  = 4096
-	maxCallHierarchySites  = 16384
+	defaultRestartLimit         = 3
+	defaultRestartWindow        = 60 * time.Second
+	defaultShutdownGrace        = 5 * time.Second
+	defaultReadinessTimeout     = 30 * time.Second
+	defaultCallHierarchyTimeout = 30 * time.Second
+	maxCallHierarchyRoots       = 16
+	maxCallHierarchyCalls       = 4096
+	maxCallHierarchySites       = 16384
 )
 
 const maxConcurrentCallHierarchyRequests = 4
@@ -62,14 +63,15 @@ const (
 
 // Manager starts and tracks configured language-server subprocesses.
 type Manager struct {
-	root             string
-	logger           *slog.Logger
-	progressDebounce time.Duration
-	restartLimit     int
-	restartWindow    time.Duration
-	shutdownGrace    time.Duration
-	toolCallTimeout  time.Duration
-	demandStart      bool
+	root                 string
+	logger               *slog.Logger
+	progressDebounce     time.Duration
+	restartLimit         int
+	restartWindow        time.Duration
+	shutdownGrace        time.Duration
+	readinessTimeout     time.Duration
+	callHierarchyTimeout time.Duration
+	demandStart          bool
 
 	mu          sync.Mutex
 	lifetimeCtx context.Context
@@ -93,6 +95,14 @@ type Symbol struct {
 	Detail   string
 	Location Location
 }
+
+// CallDirection is the one directed half of an LSP call hierarchy request.
+type CallDirection string
+
+const (
+	CallDirectionIncoming CallDirection = "incoming"
+	CallDirectionOutgoing CallDirection = "outgoing"
+)
 
 // Call is one direct edge from a hierarchy root. CallSites names every
 // source position that contributes that edge.
@@ -186,9 +196,17 @@ func WithShutdownGrace(d time.Duration) Option {
 }
 
 // WithToolCallTimeout overrides how long a request such as Definition waits
-// for its server to become ready before giving up.
+// for its server to become ready before giving up. It does not bound the LSP
+// operation after readiness; callers bound ordinary requests with ctx, while
+// call hierarchy has its own multi-request timeout.
 func WithToolCallTimeout(d time.Duration) Option {
-	return func(m *Manager) { m.toolCallTimeout = d }
+	return func(m *Manager) { m.readinessTimeout = d }
+}
+
+// WithCallHierarchyTimeout overrides the one deadline covering file sync,
+// prepare, and every directed request in a call hierarchy operation.
+func WithCallHierarchyTimeout(d time.Duration) Option {
+	return func(m *Manager) { m.callHierarchyTimeout = d }
 }
 
 // WithLogger routes this Manager's lifecycle records, and the stderr of
@@ -224,14 +242,15 @@ func WithDemandStart() Option {
 // never start. config.Validate is the one enforcer of that uniqueness.
 func NewManager(root string, entries []config.LanguageServer, opts ...Option) *Manager {
 	m := &Manager{
-		root:             root,
-		logger:           slog.New(slog.DiscardHandler),
-		progressDebounce: defaultProgressDebounce,
-		restartLimit:     defaultRestartLimit,
-		restartWindow:    defaultRestartWindow,
-		shutdownGrace:    defaultShutdownGrace,
-		toolCallTimeout:  defaultToolCallTimeout,
-		procs:            make(map[string]*serverProcess, len(entries)),
+		root:                 root,
+		logger:               slog.New(slog.DiscardHandler),
+		progressDebounce:     defaultProgressDebounce,
+		restartLimit:         defaultRestartLimit,
+		restartWindow:        defaultRestartWindow,
+		shutdownGrace:        defaultShutdownGrace,
+		readinessTimeout:     defaultReadinessTimeout,
+		callHierarchyTimeout: defaultCallHierarchyTimeout,
+		procs:                make(map[string]*serverProcess, len(entries)),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -432,7 +451,7 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 // One narrow case answers late. An attempt that has claimed its place but
 // not yet published a process has nothing to stop, so a Restart that lands
 // inside those few instructions leaves that attempt running and waits out
-// toolCallTimeout before reporting the server still starting. The server
+// readinessTimeout before reporting the server still starting. The server
 // itself is unharmed, and the request it queued is spent on the next exit
 // rather than lost. Closing this would cost a retry loop around a window
 // no larger than one spawn, which is not a trade this design makes.
@@ -446,7 +465,7 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 		// A demand-started server has no process to replace. Starting it is the
 		// only transition that can satisfy the caller's request for a ready one.
 		// Concurrent callers coalesce while the first supervisor claims attempt 1.
-		return m.waitReady(ctx, name, m.toolCallTimeout, 0)
+		return m.waitReady(ctx, name, m.readinessTimeout, 0)
 	}
 
 	// The attempt read here is the one this call retires. Everything below
@@ -458,7 +477,7 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 		slog.Int("retired_attempt", retired))
 	proc.requestRestart(retired)
 	proc.stopAttempt(ctx, m.shutdownGrace, retired)
-	return m.waitReady(ctx, name, m.toolCallTimeout, retired)
+	return m.waitReady(ctx, name, m.readinessTimeout, retired)
 }
 
 // waitReady blocks until the named server is ready on an attempt later than
@@ -620,23 +639,24 @@ func (m *Manager) SignatureHelp(
 // every symbol prepared at a 1-based position. The prepared item is sent back
 // verbatim because its Data field belongs to the language server.
 func (m *Manager) CallHierarchy(
-	ctx context.Context, name, file string, line, column int, direction string,
+	ctx context.Context, name, file string, line, column int, direction CallDirection,
 ) ([]CallHierarchy, error) {
-	if direction != "incoming" && direction != "outgoing" {
+	switch direction {
+	case CallDirectionIncoming, CallDirectionOutgoing:
+	default:
 		return nil, fmt.Errorf(
 			"call hierarchy direction must be incoming or outgoing, got %q", direction)
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, m.toolCallTimeout)
-	defer cancel()
 
 	proc, err := m.serverNamed(name)
 	if err != nil {
 		return nil, err
 	}
-	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
+	if err := m.WaitReady(ctx, name, m.readinessTimeout); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, m.callHierarchyTimeout)
+	defer cancel()
 	attempt, err := proc.callHierarchyAttempt(name)
 	if err != nil {
 		return nil, err
@@ -694,7 +714,7 @@ func directedCallHierarchies(
 	name string,
 	attempt serverAttempt,
 	items []protocol.CallHierarchyItem,
-	direction string,
+	direction CallDirection,
 ) ([]CallHierarchy, error) {
 	hierarchies := make([]CallHierarchy, len(items))
 	budget := callHierarchyBudget{}
@@ -711,7 +731,7 @@ func directedCallHierarchies(
 		for offset, response := range responses {
 			index := start + offset
 			item := items[index]
-			if direction == "incoming" {
+			if direction == CallDirectionIncoming {
 				if err := budget.acceptIncoming(item.Name, response.incoming); err != nil {
 					return nil, err
 				}
@@ -731,7 +751,7 @@ func requestDirectedCallBatch(
 	ctx context.Context,
 	server protocol.Server,
 	items []protocol.CallHierarchyItem,
-	direction string,
+	direction CallDirection,
 ) ([]directedCallResponse, error) {
 	if len(items) > maxConcurrentCallHierarchyRequests {
 		return nil, fmt.Errorf(
@@ -774,12 +794,13 @@ func requestDirectedCall(
 	ctx context.Context,
 	server protocol.Server,
 	item protocol.CallHierarchyItem,
-	direction string,
+	direction CallDirection,
 ) (directedCallResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return directedCallResponse{}, fmt.Errorf("call hierarchy: %w", err)
 	}
-	if direction == "incoming" {
+	switch direction {
+	case CallDirectionIncoming:
 		params := &protocol.CallHierarchyIncomingCallsParams{Item: item}
 		calls, err := server.IncomingCalls(ctx, params)
 		if err != nil {
@@ -789,16 +810,21 @@ func requestDirectedCall(
 			return directedCallResponse{}, fmt.Errorf("call hierarchy: %w", err)
 		}
 		return directedCallResponse{incoming: calls}, nil
+	case CallDirectionOutgoing:
+		calls, err := server.OutgoingCalls(
+			ctx, &protocol.CallHierarchyOutgoingCallsParams{Item: item})
+		if err != nil {
+			return directedCallResponse{}, fmt.Errorf(
+				"outgoing calls for %q: %w", item.Name, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return directedCallResponse{}, fmt.Errorf("call hierarchy: %w", err)
+		}
+		return directedCallResponse{outgoing: calls}, nil
+	default:
+		return directedCallResponse{}, fmt.Errorf(
+			"call hierarchy direction invariant violated: %q", direction)
 	}
-
-	calls, err := server.OutgoingCalls(ctx, &protocol.CallHierarchyOutgoingCallsParams{Item: item})
-	if err != nil {
-		return directedCallResponse{}, fmt.Errorf("outgoing calls for %q: %w", item.Name, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return directedCallResponse{}, fmt.Errorf("call hierarchy: %w", err)
-	}
-	return directedCallResponse{outgoing: calls}, nil
 }
 
 // Diagnostics asks the named server what is wrong in file, waiting for the
@@ -835,7 +861,7 @@ func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProces
 	if err != nil {
 		return nil, "", err
 	}
-	if err := m.WaitReady(ctx, name, m.toolCallTimeout); err != nil {
+	if err := m.WaitReady(ctx, name, m.readinessTimeout); err != nil {
 		return nil, "", err
 	}
 
@@ -920,7 +946,7 @@ func (b *callHierarchyBudget) acceptIncoming(
 	for _, call := range calls {
 		sites += len(call.FromRanges)
 	}
-	return b.accept(root, "incoming", len(calls), sites)
+	return b.accept(root, CallDirectionIncoming, len(calls), sites)
 }
 
 func (b *callHierarchyBudget) acceptOutgoing(
@@ -930,11 +956,11 @@ func (b *callHierarchyBudget) acceptOutgoing(
 	for _, call := range calls {
 		sites += len(call.FromRanges)
 	}
-	return b.accept(root, "outgoing", len(calls), sites)
+	return b.accept(root, CallDirectionOutgoing, len(calls), sites)
 }
 
 func (b *callHierarchyBudget) accept(
-	root, direction string, calls, sites int,
+	root string, direction CallDirection, calls, sites int,
 ) error {
 	attemptedCalls := b.calls + calls
 	if attemptedCalls > maxCallHierarchyCalls {

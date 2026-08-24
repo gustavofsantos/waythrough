@@ -25,6 +25,17 @@ var _ = Describe("call hierarchy", func() {
 
 	AfterEach(func() { cancel() })
 
+	When("an internal caller supplies an unknown direction value", func() {
+		It("rejects the invalid typed value before resolving a server", func() {
+			manager := lsp.NewManager(GinkgoT().TempDir(), nil)
+
+			_, err := manager.CallHierarchy(
+				ctx, "missing", "main.fake", 1, 1, lsp.CallDirection("sideways"))
+			Expect(err).To(MatchError(
+				`call hierarchy direction must be incoming or outgoing, got "sideways"`))
+		})
+	})
+
 	When("the prepared function has an incoming caller", func() {
 		It("returns the root, caller, and every call site", func() {
 			manager, file := fakeManager(ctx, "target()",
@@ -188,8 +199,26 @@ var _ = Describe("call hierarchy", func() {
 		})
 	})
 
-	When("a directed request exceeds the operation deadline", func() {
-		It("cancels the hierarchy instead of waiting without a bound", func() {
+	When("readiness and hierarchy work need different time bounds", func() {
+		It("does not apply the readiness timeout to the hierarchy operation", func() {
+			root := GinkgoT().TempDir()
+			file := filepath.Join(root, "main.fake")
+			Expect(os.WriteFile(file, []byte("target()"), 0o644)).To(Succeed())
+			entry := fakeEntry(
+				"-call-hierarchy",
+				"-call-hierarchy-roots-count=1",
+				"-call-hierarchy-delay=50ms")
+			manager := lsp.NewManager(root, []config.LanguageServer{entry},
+				lsp.WithToolCallTimeout(20*time.Millisecond),
+				lsp.WithCallHierarchyTimeout(time.Second))
+			Expect(manager.Start(ctx)).To(Succeed())
+			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
+
+			_, err := manager.CallHierarchy(ctx, "fake", file, 1, 1, "incoming")
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("cancels hierarchy work at its own operation deadline", func() {
 			root := GinkgoT().TempDir()
 			file := filepath.Join(root, "main.fake")
 			Expect(os.WriteFile(file, []byte("target()"), 0o644)).To(Succeed())
@@ -205,7 +234,7 @@ var _ = Describe("call hierarchy", func() {
 				}]`,
 				"-call-hierarchy-delay=100ms")
 			manager := lsp.NewManager(root, []config.LanguageServer{entry},
-				lsp.WithToolCallTimeout(20*time.Millisecond))
+				lsp.WithCallHierarchyTimeout(20*time.Millisecond))
 			Expect(manager.Start(ctx)).To(Succeed())
 			Expect(manager.WaitReady(ctx, "fake", time.Second)).To(Succeed())
 

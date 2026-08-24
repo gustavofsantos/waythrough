@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
 )
 
@@ -437,20 +438,13 @@ func handlePrepareCallHierarchy(msg message) {
 }
 
 func generatedCallHierarchyRoots(count int) string {
-	var roots strings.Builder
-	roots.WriteByte('[')
+	roots := make([]protocol.CallHierarchyItem, count)
 	for index := 0; index < count; index++ {
-		if index > 0 {
-			roots.WriteByte(',')
-		}
-		_, _ = fmt.Fprintf(&roots,
-			`{"name":"root-%02d","kind":12,"uri":"file:///root/root-%02d.fake",`+
-				`"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},`+
-				`"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}`,
-			index, index)
+		name := fmt.Sprintf("root-%02d", index)
+		roots[index] = generatedCallHierarchyItem(
+			name, uri.URI(fmt.Sprintf("file:///root/%s.fake", name)))
 	}
-	roots.WriteByte(']')
-	return roots.String()
+	return marshalGeneratedResult(roots)
 }
 
 func handleIncomingCalls(msg message) {
@@ -464,7 +458,7 @@ func handleIncomingCalls(msg message) {
 		return
 	}
 	if *incomingCallsCount > 0 {
-		respond(msg.ID, generatedDirectedCalls("from", *incomingCallsCount, *incomingCallSitesCount))
+		respond(msg.ID, generatedIncomingCalls(*incomingCallsCount, *incomingCallSitesCount))
 		return
 	}
 	if *incomingCalls == "" {
@@ -482,36 +476,52 @@ func writeOversizedHierarchyHeader() {
 	_ = out.Flush()
 }
 
-func generatedDirectedCalls(targetField string, callCount, sitesPerCall int) string {
-	call := fmt.Sprintf(`{"%s":{"name":"called","kind":12,"uri":"file:///root/called.fake",`,
-		targetField) +
-		`"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},` +
-		`"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}},` +
-		`"fromRanges":[]}`
-	const site = `{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}`
-
-	var out strings.Builder
-	out.WriteByte('[')
+func generatedIncomingCalls(callCount, sitesPerCall int) string {
+	calls := make([]protocol.CallHierarchyIncomingCall, callCount)
 	for callIndex := 0; callIndex < callCount; callIndex++ {
-		if callIndex > 0 {
-			out.WriteByte(',')
+		calls[callIndex] = protocol.CallHierarchyIncomingCall{
+			From: generatedCallHierarchyItem(
+				"called", uri.URI("file:///root/called.fake")),
+			FromRanges: generatedCallRanges(sitesPerCall),
 		}
-		if sitesPerCall == 0 {
-			out.WriteString(call)
-			continue
-		}
-		out.WriteString(strings.TrimSuffix(call, "[]}"))
-		out.WriteByte('[')
-		for siteIndex := 0; siteIndex < sitesPerCall; siteIndex++ {
-			if siteIndex > 0 {
-				out.WriteByte(',')
-			}
-			out.WriteString(site)
-		}
-		out.WriteString("]}")
 	}
-	out.WriteByte(']')
-	return out.String()
+	return marshalGeneratedResult(calls)
+}
+
+func generatedOutgoingCalls(callCount, sitesPerCall int) string {
+	calls := make([]protocol.CallHierarchyOutgoingCall, callCount)
+	for callIndex := 0; callIndex < callCount; callIndex++ {
+		calls[callIndex] = protocol.CallHierarchyOutgoingCall{
+			To: generatedCallHierarchyItem(
+				"called", uri.URI("file:///root/called.fake")),
+			FromRanges: generatedCallRanges(sitesPerCall),
+		}
+	}
+	return marshalGeneratedResult(calls)
+}
+
+func generatedCallHierarchyItem(name string, docURI uri.URI) protocol.CallHierarchyItem {
+	return protocol.CallHierarchyItem{
+		Name:           name,
+		Kind:           protocol.SymbolKindFunction,
+		URI:            docURI,
+		Range:          protocol.Range{},
+		SelectionRange: protocol.Range{},
+	}
+}
+
+func generatedCallRanges(count int) []protocol.Range {
+	return make([]protocol.Range, count)
+}
+
+func marshalGeneratedResult(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		// Every caller supplies protocol structs containing only JSON-supported
+		// fields, so a failure means the fixture's programmer invariant changed.
+		panic(fmt.Sprintf("fakelsp: marshal generated result: %v", err))
+	}
+	return string(encoded)
 }
 
 func handleOutgoingCalls(msg message) {
@@ -521,7 +531,7 @@ func handleOutgoingCalls(msg message) {
 		return
 	}
 	if *outgoingCallsCount > 0 {
-		respond(msg.ID, generatedDirectedCalls("to", *outgoingCallsCount, *outgoingCallSitesCount))
+		respond(msg.ID, generatedOutgoingCalls(*outgoingCallsCount, *outgoingCallSitesCount))
 		return
 	}
 	if *outgoingCalls == "" {
