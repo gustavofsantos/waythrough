@@ -231,19 +231,27 @@ func writeFileAtomically(path, content string, mode os.FileMode) error {
 // finishTempFile writes the new contents, gives the file its final
 // permission, and closes it, so the rename that follows publishes a file
 // that is complete on disk rather than one still buffered.
+//
+// Each step names itself in its error. The caller adds the path, and which
+// of these four steps failed is the rest of what a user needs: a full disk
+// and a permission the filesystem will not take are different problems with
+// the same remedy-shaped message otherwise.
 func finishTempFile(temp *os.File, content string, mode os.FileMode) error {
 	if _, err := io.WriteString(temp, content); err != nil {
 		_ = temp.Close()
-		return err
+		return fmt.Errorf("write its contents: %w", err)
 	}
 	if err := temp.Chmod(mode); err != nil {
 		_ = temp.Close()
-		return err
+		return fmt.Errorf("set its mode to %#o: %w", mode.Perm(), err)
 	}
 	if err := temp.Sync(); err != nil {
 		_ = temp.Close()
-		return err
+		return fmt.Errorf("flush it to disk: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close it: %w", err)
 	}
 
-	return temp.Close()
+	return nil
 }
