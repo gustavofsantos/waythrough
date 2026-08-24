@@ -1,0 +1,15 @@
+{
+  "scenarios": [
+    {
+      "name": "definition.cross_file",
+      "tool": "get_definition",
+      "file": "consumer.go",
+      "line": 4,
+      "column": 9,
+      "symbol": "Target",
+      "gold": [
+        {"file": "provider.go", "line": 4, "column": 6}
+      ]
+    }
+  ]
+}
