@@ -37,6 +37,8 @@ const (
 	defaultShutdownGrace   = 5 * time.Second
 	defaultToolCallTimeout = 30 * time.Second
 	maxCallHierarchyRoots  = 16
+	maxCallHierarchyCalls  = 4096
+	maxCallHierarchySites  = 16384
 )
 
 // Status is a language server's place in its own lifecycle.
@@ -631,11 +633,24 @@ func (m *Manager) CallHierarchy(
 	if err != nil {
 		return nil, err
 	}
-	if err := proc.requireCallHierarchy(name); err != nil {
+	server, err := proc.callHierarchyServer(name)
+	if err != nil {
 		return nil, err
 	}
+	// prepare synced the attempt that was current at that time. Sync once more
+	// after capturing the capability-validated server, then prove the same
+	// attempt is still current before sending the hierarchy request.
+	if err := proc.syncFile(ctx, path); err != nil {
+		return nil, fmt.Errorf("resync call hierarchy file: %w", err)
+	}
+	current, err := proc.callHierarchyServer(name)
+	if err != nil {
+		return nil, err
+	}
+	if current != server {
+		return nil, fmt.Errorf("language server %q restarted while this call was in flight", name)
+	}
 
-	server := proc.currentServer()
 	items, err := server.PrepareCallHierarchy(ctx, &protocol.CallHierarchyPrepareParams{
 		TextDocumentPositionParams: textDocumentPosition(path, line, column),
 	})
@@ -654,27 +669,59 @@ func (m *Manager) CallHierarchy(
 	})
 
 	hierarchies := make([]CallHierarchy, len(items))
+	budget := callHierarchyBudget{}
 	for index, item := range items {
-		switch direction {
-		case "incoming":
-			calls, err := server.IncomingCalls(ctx, &protocol.CallHierarchyIncomingCallsParams{
-				Item: item,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
-			}
-			hierarchies[index] = incomingCallHierarchy(item, calls)
-		case "outgoing":
-			calls, err := server.OutgoingCalls(ctx, &protocol.CallHierarchyOutgoingCallsParams{
-				Item: item,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("outgoing calls for %q: %w", item.Name, err)
-			}
-			hierarchies[index] = outgoingCallHierarchy(item, calls)
+		hierarchy, err := directedCallHierarchy(ctx, server, item, direction, &budget)
+		if err != nil {
+			return nil, err
 		}
+		hierarchies[index] = hierarchy
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("call hierarchy: %w", err)
+	}
+	sort.Slice(hierarchies, func(left, right int) bool {
+		return callHierarchyLess(hierarchies[left], hierarchies[right])
+	})
 	return hierarchies, nil
+}
+
+func directedCallHierarchy(
+	ctx context.Context,
+	server protocol.Server,
+	item protocol.CallHierarchyItem,
+	direction string,
+	budget *callHierarchyBudget,
+) (CallHierarchy, error) {
+	if err := ctx.Err(); err != nil {
+		return CallHierarchy{}, fmt.Errorf("call hierarchy: %w", err)
+	}
+	if direction == "incoming" {
+		params := &protocol.CallHierarchyIncomingCallsParams{Item: item}
+		calls, err := server.IncomingCalls(ctx, params)
+		if err != nil {
+			return CallHierarchy{}, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return CallHierarchy{}, fmt.Errorf("call hierarchy: %w", err)
+		}
+		if err := budget.acceptIncoming(calls); err != nil {
+			return CallHierarchy{}, err
+		}
+		return incomingCallHierarchy(item, calls), nil
+	}
+
+	calls, err := server.OutgoingCalls(ctx, &protocol.CallHierarchyOutgoingCallsParams{Item: item})
+	if err != nil {
+		return CallHierarchy{}, fmt.Errorf("outgoing calls for %q: %w", item.Name, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return CallHierarchy{}, fmt.Errorf("call hierarchy: %w", err)
+	}
+	if err := budget.acceptOutgoing(calls); err != nil {
+		return CallHierarchy{}, err
+	}
+	return outgoingCallHierarchy(item, calls), nil
 }
 
 // Diagnostics asks the named server what is wrong in file, waiting for the
@@ -784,6 +831,53 @@ func incomingCallHierarchy(
 	return hierarchy
 }
 
+type callHierarchyBudget struct {
+	calls int
+	sites int
+}
+
+func (b *callHierarchyBudget) acceptIncoming(calls []protocol.CallHierarchyIncomingCall) error {
+	if err := b.acceptCalls(len(calls)); err != nil {
+		return err
+	}
+	for _, call := range calls {
+		if err := b.acceptSites(len(call.FromRanges)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *callHierarchyBudget) acceptOutgoing(calls []protocol.CallHierarchyOutgoingCall) error {
+	if err := b.acceptCalls(len(calls)); err != nil {
+		return err
+	}
+	for _, call := range calls {
+		if err := b.acceptSites(len(call.FromRanges)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *callHierarchyBudget) acceptCalls(count int) error {
+	if count > maxCallHierarchyCalls-b.calls {
+		return fmt.Errorf(
+			"call hierarchy result maximum is %d calls", maxCallHierarchyCalls)
+	}
+	b.calls += count
+	return nil
+}
+
+func (b *callHierarchyBudget) acceptSites(count int) error {
+	if count > maxCallHierarchySites-b.sites {
+		return fmt.Errorf(
+			"call hierarchy result maximum is %d call sites", maxCallHierarchySites)
+	}
+	b.sites += count
+	return nil
+}
+
 func outgoingCallHierarchy(
 	root protocol.CallHierarchyItem, outgoing []protocol.CallHierarchyOutgoingCall,
 ) CallHierarchy {
@@ -814,7 +908,7 @@ func locationsFromRanges(docURI uri.URI, ranges []protocol.Range) []Location {
 
 func sortCalls(calls []Call) {
 	sort.Slice(calls, func(left, right int) bool {
-		return symbolLess(calls[left].Symbol, calls[right].Symbol)
+		return callLess(calls[left], calls[right])
 	})
 }
 
@@ -822,7 +916,13 @@ func symbolLess(left, right Symbol) bool {
 	if left.Location != right.Location {
 		return locationLess(left.Location, right.Location)
 	}
-	return left.Name < right.Name
+	if left.Name != right.Name {
+		return left.Name < right.Name
+	}
+	if left.Kind != right.Kind {
+		return left.Kind < right.Kind
+	}
+	return left.Detail < right.Detail
 }
 
 func locationLess(left, right Location) bool {
@@ -833,6 +933,39 @@ func locationLess(left, right Location) bool {
 		return left.Line < right.Line
 	}
 	return left.Column < right.Column
+}
+
+func callLess(left, right Call) bool {
+	if symbolLess(left.Symbol, right.Symbol) {
+		return true
+	}
+	if symbolLess(right.Symbol, left.Symbol) {
+		return false
+	}
+	for index := 0; index < min(len(left.CallSites), len(right.CallSites)); index++ {
+		if left.CallSites[index] != right.CallSites[index] {
+			return locationLess(left.CallSites[index], right.CallSites[index])
+		}
+	}
+	return len(left.CallSites) < len(right.CallSites)
+}
+
+func callHierarchyLess(left, right CallHierarchy) bool {
+	if symbolLess(left.Symbol, right.Symbol) {
+		return true
+	}
+	if symbolLess(right.Symbol, left.Symbol) {
+		return false
+	}
+	for index := 0; index < min(len(left.Calls), len(right.Calls)); index++ {
+		if callLess(left.Calls[index], right.Calls[index]) {
+			return true
+		}
+		if callLess(right.Calls[index], left.Calls[index]) {
+			return false
+		}
+	}
+	return len(left.Calls) < len(right.Calls)
 }
 
 func callHierarchySymbol(item protocol.CallHierarchyItem) Symbol {
@@ -848,63 +981,20 @@ func callHierarchySymbol(item protocol.CallHierarchyItem) Symbol {
 	}
 }
 
+// symbolKindNames follows LSP's contiguous SymbolKind values, 1 through 26.
+// Slot zero and values beyond the table map to unknown.
+var symbolKindNames = [...]string{
+	"unknown", "file", "module", "namespace", "package", "class", "method",
+	"property", "field", "constructor", "enum", "interface", "function", "variable",
+	"constant", "string", "number", "boolean", "array", "object", "key", "null",
+	"enum_member", "struct", "event", "operator", "type_parameter",
+}
+
 func symbolKindName(kind protocol.SymbolKind) string {
-	switch kind {
-	case protocol.SymbolKindFile:
-		return "file"
-	case protocol.SymbolKindModule:
-		return "module"
-	case protocol.SymbolKindNamespace:
-		return "namespace"
-	case protocol.SymbolKindPackage:
-		return "package"
-	case protocol.SymbolKindClass:
-		return "class"
-	case protocol.SymbolKindMethod:
-		return "method"
-	case protocol.SymbolKindProperty:
-		return "property"
-	case protocol.SymbolKindField:
-		return "field"
-	case protocol.SymbolKindConstructor:
-		return "constructor"
-	case protocol.SymbolKindEnum:
-		return "enum"
-	case protocol.SymbolKindInterface:
-		return "interface"
-	case protocol.SymbolKindFunction:
-		return "function"
-	case protocol.SymbolKindVariable:
-		return "variable"
-	case protocol.SymbolKindConstant:
-		return "constant"
-	case protocol.SymbolKindString:
-		return "string"
-	case protocol.SymbolKindNumber:
-		return "number"
-	case protocol.SymbolKindBoolean:
-		return "boolean"
-	case protocol.SymbolKindArray:
-		return "array"
-	case protocol.SymbolKindObject:
-		return "object"
-	case protocol.SymbolKindKey:
-		return "key"
-	case protocol.SymbolKindNull:
-		return "null"
-	case protocol.SymbolKindEnumMember:
-		return "enum_member"
-	case protocol.SymbolKindStruct:
-		return "struct"
-	case protocol.SymbolKindEvent:
-		return "event"
-	case protocol.SymbolKindOperator:
-		return "operator"
-	case protocol.SymbolKindTypeParameter:
-		return "type_parameter"
-	default:
-		return "unknown"
+	if kind >= protocol.SymbolKind(len(symbolKindNames)) {
+		return symbolKindNames[0]
 	}
+	return symbolKindNames[kind]
 }
 
 // signatureHelpFromProtocol converts a signature help result into the shape
@@ -1269,14 +1359,15 @@ func (p *serverProcess) requirePullDiagnostics(name string) error {
 	return nil
 }
 
-// requireCallHierarchy reads status and capability in one lock hold so a
-// restart cannot make a retired attempt's advertisement look current.
-func (p *serverProcess) requireCallHierarchy(name string) error {
+// callHierarchyServer returns the server in the same lock hold that validates
+// its status and capability. A concurrent restart can retire that server, but
+// it cannot redirect this operation to an unvalidated replacement.
+func (p *serverProcess) callHierarchyServer(name string) (protocol.Server, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.status != StatusReady {
-		return fmt.Errorf("language server %q restarted while this call was in flight", name)
+		return nil, fmt.Errorf("language server %q restarted while this call was in flight", name)
 	}
 
 	supported := false
@@ -1289,9 +1380,9 @@ func (p *serverProcess) requireCallHierarchy(name string) error {
 		supported = provider != nil
 	}
 	if !supported {
-		return fmt.Errorf("language server %q does not support call hierarchy", name)
+		return nil, fmt.Errorf("language server %q does not support call hierarchy", name)
 	}
-	return nil
+	return p.server, nil
 }
 
 // syncFile tells the language server about path's current on-disk content:
@@ -1312,7 +1403,12 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 	}
 
 	p.mu.Lock()
+	if p.status != StatusReady || p.server == nil {
+		p.mu.Unlock()
+		return fmt.Errorf("language server restarted while syncing %s", path)
+	}
 	server := p.server
+	generation := p.generation
 	prev, wasOpen := p.openFiles[path]
 	p.mu.Unlock()
 
@@ -1352,6 +1448,10 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 	}
 
 	p.mu.Lock()
+	if p.generation != generation || p.server != server {
+		p.mu.Unlock()
+		return fmt.Errorf("language server restarted while syncing %s", path)
+	}
 	if p.openFiles == nil {
 		p.openFiles = make(map[string]openFile)
 	}

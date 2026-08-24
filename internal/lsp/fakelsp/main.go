@@ -56,7 +56,11 @@ var (
 	callHierarchyOptions      = flag.Bool("call-hierarchy-options", false, "advertise callHierarchyProvider as an options object in the initialize result")
 	callHierarchyRoots        = flag.String("call-hierarchy-roots", "", "raw JSON result to answer textDocument/prepareCallHierarchy with; empty means no prepared roots")
 	incomingCalls             = flag.String("incoming-calls", "", "raw JSON result to answer callHierarchy/incomingCalls with; empty means no incoming calls")
+	incomingCallsCount        = flag.Int("incoming-calls-count", 0, "number of generated incoming calls; zero uses -incoming-calls")
+	incomingCallSitesCount    = flag.Int("incoming-call-sites-count", 0, "number of generated sites on each incoming call")
 	outgoingCalls             = flag.String("outgoing-calls", "", "raw JSON result to answer callHierarchy/outgoingCalls with; empty means no outgoing calls")
+	outgoingCallsCount        = flag.Int("outgoing-calls-count", 0, "number of generated outgoing calls; zero uses -outgoing-calls")
+	outgoingCallSitesCount    = flag.Int("outgoing-call-sites-count", 0, "number of generated sites on each outgoing call")
 	callHierarchyErrorAfter   = flag.Int("call-hierarchy-error-after", -1, "0-based directed call request index to fail; negative means every directed request succeeds")
 	callHierarchyRequiredData = flag.String("call-hierarchy-required-data", "", "raw JSON data that every directed call item must preserve; empty skips the check")
 	callHierarchyDelay        = flag.Duration("call-hierarchy-delay", 0, "delay every directed call response, to test the operation deadline")
@@ -405,6 +409,10 @@ func handleIncomingCalls(msg message) {
 	if !acceptDirectedCall(msg) {
 		return
 	}
+	if *incomingCallsCount > 0 {
+		respond(msg.ID, generatedDirectedCalls("from", *incomingCallsCount, *incomingCallSitesCount))
+		return
+	}
 	if *incomingCalls == "" {
 		respond(msg.ID, "[]")
 		return
@@ -412,8 +420,44 @@ func handleIncomingCalls(msg message) {
 	respond(msg.ID, *incomingCalls)
 }
 
+func generatedDirectedCalls(targetField string, callCount, sitesPerCall int) string {
+	call := fmt.Sprintf(`{"%s":{"name":"called","kind":12,"uri":"file:///root/called.fake",`,
+		targetField) +
+		`"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},` +
+		`"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}},` +
+		`"fromRanges":[]}`
+	const site = `{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}`
+
+	var out strings.Builder
+	out.WriteByte('[')
+	for callIndex := 0; callIndex < callCount; callIndex++ {
+		if callIndex > 0 {
+			out.WriteByte(',')
+		}
+		if sitesPerCall == 0 {
+			out.WriteString(call)
+			continue
+		}
+		out.WriteString(strings.TrimSuffix(call, "[]}"))
+		out.WriteByte('[')
+		for siteIndex := 0; siteIndex < sitesPerCall; siteIndex++ {
+			if siteIndex > 0 {
+				out.WriteByte(',')
+			}
+			out.WriteString(site)
+		}
+		out.WriteString("]}")
+	}
+	out.WriteByte(']')
+	return out.String()
+}
+
 func handleOutgoingCalls(msg message) {
 	if !acceptDirectedCall(msg) {
+		return
+	}
+	if *outgoingCallsCount > 0 {
+		respond(msg.ID, generatedDirectedCalls("to", *outgoingCallsCount, *outgoingCallSitesCount))
 		return
 	}
 	if *outgoingCalls == "" {

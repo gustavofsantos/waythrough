@@ -33,7 +33,10 @@ var _ = Describe("call hierarchy", func() {
 					"name":"target","kind":12,"detail":"func target()",
 					"uri":"file:///root/main.fake",
 					"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":8}},
-					"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":6}},
+					"selectionRange":{
+						"start":{"line":0,"character":0},
+						"end":{"line":0,"character":6}
+					},
 					"data":{"opaque":"preserve me"}
 				}]`,
 				"-incoming-calls="+`[{
@@ -41,7 +44,10 @@ var _ = Describe("call hierarchy", func() {
 						"name":"caller","kind":12,"detail":"func caller()",
 						"uri":"file:///root/caller.fake",
 						"range":{"start":{"line":3,"character":0},"end":{"line":5,"character":1}},
-						"selectionRange":{"start":{"line":3,"character":5},"end":{"line":3,"character":11}}
+						"selectionRange":{
+							"start":{"line":3,"character":5},
+							"end":{"line":3,"character":11}
+						}
 					},
 					"fromRanges":[
 						{"start":{"line":4,"character":1},"end":{"line":4,"character":7}},
@@ -77,14 +83,20 @@ var _ = Describe("call hierarchy", func() {
 				"-call-hierarchy-roots="+`[{
 					"name":"root","kind":12,"uri":"file:///root/main.fake",
 					"range":{"start":{"line":0,"character":0},"end":{"line":2,"character":1}},
-					"selectionRange":{"start":{"line":0,"character":5},"end":{"line":0,"character":9}}
+					"selectionRange":{
+						"start":{"line":0,"character":5},
+						"end":{"line":0,"character":9}
+					}
 				}]`,
 				"-outgoing-calls="+`[{
 					"to":{
 						"name":"callee","kind":6,"detail":"func callee()",
 						"uri":"file:///root/callee.fake",
 						"range":{"start":{"line":6,"character":0},"end":{"line":8,"character":1}},
-						"selectionRange":{"start":{"line":6,"character":5},"end":{"line":6,"character":11}}
+						"selectionRange":{
+							"start":{"line":6,"character":5},
+							"end":{"line":6,"character":11}
+						}
 					},
 					"fromRanges":[{"start":{"line":1,"character":1},"end":{"line":1,"character":7}}]
 				}]`)
@@ -114,11 +126,43 @@ var _ = Describe("call hierarchy", func() {
 				"-call-hierarchy-roots="+`[{
 					"name":"target","kind":12,"uri":"file:///root/main.fake",
 					"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},
-					"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}
+					"selectionRange":{
+						"start":{"line":0,"character":0},
+						"end":{"line":0,"character":1}
+					}
 				}]`,
 				"-incoming-calls="+`[
-					{"from":{"name":"caller-z","kind":12,"uri":"file:///root/z.fake","range":{"start":{"line":8,"character":0},"end":{"line":8,"character":1}},"selectionRange":{"start":{"line":8,"character":0},"end":{"line":8,"character":1}}},"fromRanges":[{"start":{"line":9,"character":4},"end":{"line":9,"character":5}},{"start":{"line":9,"character":1},"end":{"line":9,"character":2}}]},
-					{"from":{"name":"caller-a","kind":12,"uri":"file:///root/a.fake","range":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}},"selectionRange":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}}},"fromRanges":[]}
+					{
+						"from":{
+							"name":"caller-z","kind":12,"uri":"file:///root/z.fake",
+							"range":{
+								"start":{"line":8,"character":0},
+								"end":{"line":8,"character":1}
+							},
+							"selectionRange":{
+								"start":{"line":8,"character":0},
+								"end":{"line":8,"character":1}
+							}
+						},
+						"fromRanges":[
+							{"start":{"line":9,"character":4},"end":{"line":9,"character":5}},
+							{"start":{"line":9,"character":1},"end":{"line":9,"character":2}}
+						]
+					},
+					{
+						"from":{
+							"name":"caller-a","kind":12,"uri":"file:///root/a.fake",
+							"range":{
+								"start":{"line":1,"character":0},
+								"end":{"line":1,"character":1}
+							},
+							"selectionRange":{
+								"start":{"line":1,"character":0},
+								"end":{"line":1,"character":1}
+							}
+						},
+						"fromRanges":[]
+					}
 				]`)
 
 			hierarchies, err := manager.CallHierarchy(ctx, "fake", file, 1, 1, "incoming")
@@ -154,7 +198,10 @@ var _ = Describe("call hierarchy", func() {
 				"-call-hierarchy-roots="+`[{
 					"name":"target","kind":12,"uri":"file:///root/main.fake",
 					"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},
-					"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}}
+					"selectionRange":{
+						"start":{"line":0,"character":0},
+						"end":{"line":0,"character":1}
+					}
 				}]`,
 				"-call-hierarchy-delay=100ms")
 			manager := lsp.NewManager(root, []config.LanguageServer{entry},

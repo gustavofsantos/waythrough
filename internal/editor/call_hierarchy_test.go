@@ -42,12 +42,12 @@ type callHierarchyToolOutput struct {
 }
 
 func callHierarchyTool(
-	ctx context.Context, session *mcp.ClientSession, file string, line, column int, direction string,
+	ctx context.Context, session *mcp.ClientSession, column int, direction string,
 ) *mcp.CallToolResult {
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "get_call_hierarchy",
 		Arguments: map[string]any{
-			"file": file, "line": line, "column": column, "direction": direction,
+			"file": "main.fake", "line": 1, "column": column, "direction": direction,
 		},
 	})
 	Expect(err).NotTo(HaveOccurred(), "a tool-level failure is not a protocol error")
@@ -103,7 +103,10 @@ var _ = Describe("get_call_hierarchy", func() {
 					"detail":"func target()",
 					"uri":"file:///root/main.fake",
 					"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":8}},
-					"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":6}},
+					"selectionRange":{
+						"start":{"line":0,"character":0},
+						"end":{"line":0,"character":6}
+					},
 					"data":{"opaque":"preserve me"}
 				}]`,
 				`-call-hierarchy-required-data={"opaque":"preserve me"}`,
@@ -114,7 +117,10 @@ var _ = Describe("get_call_hierarchy", func() {
 						"detail":"func caller()",
 						"uri":"file:///root/caller.fake",
 						"range":{"start":{"line":3,"character":0},"end":{"line":5,"character":1}},
-						"selectionRange":{"start":{"line":3,"character":5},"end":{"line":3,"character":11}}
+						"selectionRange":{
+							"start":{"line":3,"character":5},
+							"end":{"line":3,"character":11}
+						}
 					},
 					"fromRanges":[
 						{"start":{"line":4,"character":1},"end":{"line":4,"character":7}},
@@ -125,7 +131,7 @@ var _ = Describe("get_call_hierarchy", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "incoming")
+			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 
 			out := decodeToolOutput[callHierarchyToolOutput](result)
@@ -157,21 +163,27 @@ var _ = Describe("get_call_hierarchy", func() {
 				"-call-hierarchy-roots="+`[{
 					"name":"root","kind":12,"uri":"file:///root/main.fake",
 					"range":{"start":{"line":0,"character":0},"end":{"line":2,"character":1}},
-					"selectionRange":{"start":{"line":0,"character":5},"end":{"line":0,"character":9}}
+					"selectionRange":{
+						"start":{"line":0,"character":5},
+						"end":{"line":0,"character":9}
+					}
 				}]`,
 				"-outgoing-calls="+`[{
 					"to":{
 						"name":"callee","kind":6,"detail":"func callee()",
 						"uri":"file:///root/callee.fake",
 						"range":{"start":{"line":6,"character":0},"end":{"line":8,"character":1}},
-						"selectionRange":{"start":{"line":6,"character":5},"end":{"line":6,"character":11}}
+						"selectionRange":{
+							"start":{"line":6,"character":5},
+							"end":{"line":6,"character":11}
+						}
 					},
 					"fromRanges":[{"start":{"line":1,"character":1},"end":{"line":1,"character":7}}]
 				}]`)
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 6, "outgoing")
+			result := callHierarchyTool(ctx, session, 6, "outgoing")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 
 			out := decodeToolOutput[callHierarchyToolOutput](result)
@@ -198,7 +210,7 @@ var _ = Describe("get_call_hierarchy", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "sideways")
+			result := callHierarchyTool(ctx, session, 1, "sideways")
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring("incoming or outgoing"))
 			Expect(recordedMethods(requestLog)).NotTo(ContainSubstring("CallHierarchy"))
@@ -214,7 +226,7 @@ var _ = Describe("get_call_hierarchy", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "incoming")
+			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring("does not support call hierarchy"))
 			methods := recordedMethods(requestLog)
@@ -230,7 +242,7 @@ var _ = Describe("get_call_hierarchy", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "incoming")
+			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring("does not support call hierarchy"))
 		})
@@ -243,7 +255,7 @@ var _ = Describe("get_call_hierarchy", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "incoming")
+			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 			Expect(decodeToolOutput[callHierarchyToolOutput](result).Roots).To(BeEmpty())
 		})
@@ -260,10 +272,11 @@ var _ = Describe("get_call_hierarchy", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "incoming")
+			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring("maximum is 16"))
-			Expect(recordedMethods(requestLog)).NotTo(ContainSubstring("callHierarchy/incomingCalls"))
+			Expect(recordedMethods(requestLog)).NotTo(
+				ContainSubstring("callHierarchy/incomingCalls"))
 		})
 	})
 
@@ -278,10 +291,12 @@ var _ = Describe("get_call_hierarchy", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "incoming")
+			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 			Expect(decodeToolOutput[callHierarchyToolOutput](result).Roots).To(HaveLen(16))
-			Expect(strings.Count(recordedMethods(requestLog), "callHierarchy/incomingCalls")).To(Equal(16))
+			callRequests := strings.Count(
+				recordedMethods(requestLog), "callHierarchy/incomingCalls")
+			Expect(callRequests).To(Equal(16))
 		})
 	})
 
@@ -295,10 +310,74 @@ var _ = Describe("get_call_hierarchy", func() {
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "incoming")
+			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeTrue())
 			Expect(errorText(result)).To(ContainSubstring("incoming calls for"))
 			Expect(errorText(result)).NotTo(ContainSubstring(`"roots"`))
+		})
+	})
+
+	When("the server returns more than the call result budget", func() {
+		It("fails instead of converting an unbounded result", func() {
+			writeFile(root, "main.fake", "target()")
+			cfg := fakeConfig(
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+cannedCallHierarchyRoots(1),
+				"-incoming-calls-count=4097")
+			manager := lsp.NewManager(root, cfg.LanguageServers)
+			session := connect(ctx, manager, cfg)
+
+			result := callHierarchyTool(ctx, session, 1, "incoming")
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring("maximum is 4096 calls"))
+		})
+	})
+
+	When("the server returns more than the call-site result budget", func() {
+		It("fails instead of sorting an unbounded result", func() {
+			writeFile(root, "main.fake", "target()")
+			cfg := fakeConfig(
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+cannedCallHierarchyRoots(1),
+				"-incoming-calls-count=1",
+				"-incoming-call-sites-count=16385")
+			manager := lsp.NewManager(root, cfg.LanguageServers)
+			session := connect(ctx, manager, cfg)
+
+			result := callHierarchyTool(ctx, session, 1, "incoming")
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring("maximum is 16384 call sites"))
+		})
+	})
+
+	When("an outgoing result exceeds either result budget", func() {
+		It("rejects too many calls", func() {
+			writeFile(root, "main.fake", "target()")
+			cfg := fakeConfig(
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+cannedCallHierarchyRoots(1),
+				"-outgoing-calls-count=4097")
+			manager := lsp.NewManager(root, cfg.LanguageServers)
+			session := connect(ctx, manager, cfg)
+
+			result := callHierarchyTool(ctx, session, 1, "outgoing")
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring("maximum is 4096 calls"))
+		})
+
+		It("rejects too many call sites", func() {
+			writeFile(root, "main.fake", "target()")
+			cfg := fakeConfig(
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+cannedCallHierarchyRoots(1),
+				"-outgoing-calls-count=1",
+				"-outgoing-call-sites-count=16385")
+			manager := lsp.NewManager(root, cfg.LanguageServers)
+			session := connect(ctx, manager, cfg)
+
+			result := callHierarchyTool(ctx, session, 1, "outgoing")
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring("maximum is 16384 call sites"))
 		})
 	})
 
@@ -308,13 +387,33 @@ var _ = Describe("get_call_hierarchy", func() {
 			cfg := fakeConfig(
 				"-call-hierarchy",
 				"-call-hierarchy-roots="+`[
-					{"name":"root-z","kind":12,"uri":"file:///root/z.fake","range":{"start":{"line":8,"character":0},"end":{"line":8,"character":1}},"selectionRange":{"start":{"line":8,"character":0},"end":{"line":8,"character":1}}},
-					{"name":"root-a","kind":12,"uri":"file:///root/a.fake","range":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}},"selectionRange":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}}}
+					{
+						"name":"root-z","kind":12,"uri":"file:///root/z.fake",
+						"range":{
+							"start":{"line":8,"character":0},
+							"end":{"line":8,"character":1}
+						},
+						"selectionRange":{
+							"start":{"line":8,"character":0},
+							"end":{"line":8,"character":1}
+						}
+					},
+					{
+						"name":"root-a","kind":12,"uri":"file:///root/a.fake",
+						"range":{
+							"start":{"line":1,"character":0},
+							"end":{"line":1,"character":1}
+						},
+						"selectionRange":{
+							"start":{"line":1,"character":0},
+							"end":{"line":1,"character":1}
+						}
+					}
 				]`)
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
 
-			result := callHierarchyTool(ctx, session, "main.fake", 1, 1, "incoming")
+			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 			out := decodeToolOutput[callHierarchyToolOutput](result)
 			Expect([]string{out.Roots[0].Symbol.Name, out.Roots[1].Symbol.Name}).To(
