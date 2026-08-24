@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
 )
@@ -161,19 +162,12 @@ func validateDirectedResultSize(data []byte) error {
 }
 
 func requestIncomingCalls(
-	ctx context.Context, attempt serverAttempt, item protocol.CallHierarchyItem,
+	ctx context.Context, conn jsonrpc2.Conn, item protocol.CallHierarchyItem,
 ) ([]protocol.CallHierarchyIncomingCall, error) {
 	params := &protocol.CallHierarchyIncomingCallsParams{Item: item}
-	if attempt.conn == nil {
-		calls, err := attempt.server.IncomingCalls(ctx, params)
-		if err != nil {
-			return nil, fmt.Errorf("request incoming calls: %w", err)
-		}
-		return calls, nil
-	}
 	var result boundedIncomingCallResult
 	if err := protocol.Call(
-		ctx, attempt.conn, protocol.MethodCallHierarchyIncomingCalls, params, &result,
+		ctx, conn, protocol.MethodCallHierarchyIncomingCalls, params, &result,
 	); err != nil {
 		return nil, fmt.Errorf("request incoming calls: %w", err)
 	}
@@ -181,19 +175,12 @@ func requestIncomingCalls(
 }
 
 func requestOutgoingCalls(
-	ctx context.Context, attempt serverAttempt, item protocol.CallHierarchyItem,
+	ctx context.Context, conn jsonrpc2.Conn, item protocol.CallHierarchyItem,
 ) ([]protocol.CallHierarchyOutgoingCall, error) {
 	params := &protocol.CallHierarchyOutgoingCallsParams{Item: item}
-	if attempt.conn == nil {
-		calls, err := attempt.server.OutgoingCalls(ctx, params)
-		if err != nil {
-			return nil, fmt.Errorf("request outgoing calls: %w", err)
-		}
-		return calls, nil
-	}
 	var result boundedOutgoingCallResult
 	if err := protocol.Call(
-		ctx, attempt.conn, protocol.MethodCallHierarchyOutgoingCalls, params, &result,
+		ctx, conn, protocol.MethodCallHierarchyOutgoingCalls, params, &result,
 	); err != nil {
 		return nil, fmt.Errorf("request outgoing calls: %w", err)
 	}

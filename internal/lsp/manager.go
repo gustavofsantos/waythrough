@@ -713,6 +713,10 @@ type directedCallResponse struct {
 	outgoing []protocol.CallHierarchyOutgoingCall
 }
 
+type directedCallRequester func(
+	context.Context, protocol.CallHierarchyItem, CallDirection,
+) (directedCallResponse, error)
+
 func directedCallHierarchies(
 	ctx context.Context,
 	proc *serverProcess,
@@ -723,10 +727,15 @@ func directedCallHierarchies(
 ) ([]CallHierarchy, error) {
 	hierarchies := make([]CallHierarchy, len(items))
 	budget := callHierarchyBudget{}
+	request := func(
+		ctx context.Context, item protocol.CallHierarchyItem, direction CallDirection,
+	) (directedCallResponse, error) {
+		return requestDirectedCall(ctx, attempt.conn, item, direction)
+	}
 	for start := 0; start < len(items); start += maxConcurrentCallHierarchyRequests {
 		end := min(start+maxConcurrentCallHierarchyRequests, len(items))
 		responses, err := requestDirectedCallBatch(
-			ctx, attempt, items[start:end], direction)
+			ctx, request, items[start:end], direction)
 		if err != nil {
 			return nil, err
 		}
@@ -754,7 +763,7 @@ func directedCallHierarchies(
 
 func requestDirectedCallBatch(
 	ctx context.Context,
-	attempt serverAttempt,
+	request directedCallRequester,
 	items []protocol.CallHierarchyItem,
 	direction CallDirection,
 ) ([]directedCallResponse, error) {
@@ -774,7 +783,7 @@ func requestDirectedCallBatch(
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			response, err := requestDirectedCall(batchCtx, attempt, items[index], direction)
+			response, err := request(batchCtx, items[index], direction)
 			if err != nil {
 				select {
 				case firstError <- err:
@@ -797,7 +806,7 @@ func requestDirectedCallBatch(
 
 func requestDirectedCall(
 	ctx context.Context,
-	attempt serverAttempt,
+	conn jsonrpc2.Conn,
 	item protocol.CallHierarchyItem,
 	direction CallDirection,
 ) (directedCallResponse, error) {
@@ -806,7 +815,7 @@ func requestDirectedCall(
 	}
 	switch direction {
 	case CallDirectionIncoming:
-		calls, err := requestIncomingCalls(ctx, attempt, item)
+		calls, err := requestIncomingCalls(ctx, conn, item)
 		if err != nil {
 			return directedCallResponse{}, fmt.Errorf("incoming calls for %q: %w", item.Name, err)
 		}
@@ -815,7 +824,7 @@ func requestDirectedCall(
 		}
 		return directedCallResponse{incoming: calls}, nil
 	case CallDirectionOutgoing:
-		calls, err := requestOutgoingCalls(ctx, attempt, item)
+		calls, err := requestOutgoingCalls(ctx, conn, item)
 		if err != nil {
 			return directedCallResponse{}, fmt.Errorf(
 				"outgoing calls for %q: %w", item.Name, err)
@@ -1481,7 +1490,8 @@ func (p *serverProcess) callHierarchyAttempt(name string) (serverAttempt, error)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.status != StatusReady || p.retiring || p.shuttingDown || p.server == nil {
+	if p.status != StatusReady || p.retiring || p.shuttingDown ||
+		p.server == nil || p.conn == nil {
 		return serverAttempt{}, fmt.Errorf(
 			"language server %q restarted while this call was in flight", name)
 	}

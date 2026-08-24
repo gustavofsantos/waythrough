@@ -50,9 +50,22 @@ func TestDirectedCallBatchCancelsEveryPeerAfterFailure(t *testing.T) {
 		{Name: "peer-2"},
 		{Name: "peer-3"},
 	}
+	request := func(
+		ctx context.Context, item protocol.CallHierarchyItem, direction CallDirection,
+	) (directedCallResponse, error) {
+		if direction != CallDirectionIncoming {
+			return directedCallResponse{}, errors.New("unexpected direction")
+		}
+		calls, err := server.IncomingCalls(
+			ctx, &protocol.CallHierarchyIncomingCallsParams{Item: item})
+		if err != nil {
+			return directedCallResponse{}, fmt.Errorf("incoming calls: %w", err)
+		}
+		return directedCallResponse{incoming: calls}, nil
+	}
 
 	_, err := requestDirectedCallBatch(
-		context.Background(), serverAttempt{server: server}, items, "incoming")
+		context.Background(), request, items, CallDirectionIncoming)
 	if err == nil || !strings.Contains(err.Error(), "directed failure") {
 		t.Fatalf("batch error = %v", err)
 	}

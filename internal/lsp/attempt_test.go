@@ -10,6 +10,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
 
 	"github.com/gustavofsantos/waythrough/internal/config"
@@ -83,6 +84,7 @@ var _ = Describe("an attempt that races the shutdown of its server", func() {
 		server := &failingDirectedBatchServer{}
 		proc.mu.Lock()
 		proc.server = server
+		proc.conn = &inertJSONRPCConn{}
 		proc.status = StatusReady
 		proc.capabilities.CallHierarchyProvider = protocol.Boolean(true)
 		proc.mu.Unlock()
@@ -96,6 +98,22 @@ var _ = Describe("an attempt that races the shutdown of its server", func() {
 		Expect(proc.validateCallHierarchyAttempt("fake", attempt)).To(
 			MatchError(ContainSubstring("restarted while this call was in flight")))
 		_, err = proc.callHierarchyAttempt("fake")
+		Expect(err).To(MatchError(
+			ContainSubstring("restarted while this call was in flight")))
+	})
+
+	It("rejects a hierarchy attempt without its bounded JSON-RPC connection", func() {
+		proc := newAttemptTracker(config.ReadinessHandshake)
+		_, spawning := proc.beginAttempt()
+		Expect(spawning).To(BeTrue())
+
+		proc.mu.Lock()
+		proc.server = &failingDirectedBatchServer{}
+		proc.status = StatusReady
+		proc.capabilities.CallHierarchyProvider = protocol.Boolean(true)
+		proc.mu.Unlock()
+
+		_, err := proc.callHierarchyAttempt("fake")
 		Expect(err).To(MatchError(
 			ContainSubstring("restarted while this call was in flight")))
 	})
@@ -135,6 +153,10 @@ var _ = Describe("an attempt that races the shutdown of its server", func() {
 			"the spawn no one could see must have ended the process it started")
 	})
 })
+
+type inertJSONRPCConn struct {
+	jsonrpc2.Conn
+}
 
 var _ = Describe("a restart request for an attempt the server already replaced", func() {
 	It("does not classify the replacement's next exit as an explicit restart", func() {

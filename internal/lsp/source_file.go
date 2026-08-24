@@ -14,6 +14,7 @@ func readSourceFile(ctx context.Context, path string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("read source file: %w", err)
 	}
+	// Reject pipes and devices before Open, because opening either can block.
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat source file: %w", err)
@@ -22,10 +23,11 @@ func readSourceFile(ctx context.Context, path string) ([]byte, error) {
 		return nil, err
 	}
 
-	file, err := os.Open(path)
+	file, err := openSourceFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open source file: %w", err)
 	}
+	// Validate the descriptor too, because the path can change after Stat.
 	openedInfo, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
