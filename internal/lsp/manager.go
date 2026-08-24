@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
 
@@ -1601,7 +1600,7 @@ func (p *serverProcess) startProcess(ctx context.Context, generation int) error 
 		return fmt.Errorf("start %s: %w", p.entry.Command, err)
 	}
 
-	stream := jsonrpc2.NewStream(pipeRWC{ReadCloser: stdout, WriteCloser: stdin})
+	stream := newLSPStream(pipeRWC{ReadCloser: stdout, WriteCloser: stdin})
 	_, _, server := protocol.NewClient(ctx, &client{proc: p, generation: generation}, stream)
 
 	p.mu.Lock()

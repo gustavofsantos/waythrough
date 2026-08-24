@@ -79,6 +79,10 @@ var (
 	directedCalls  int
 )
 
+var oversizedHierarchyResponse = flag.String(
+	"oversized-call-hierarchy-response", "",
+	"call hierarchy phase that declares a 64 MiB response without sending its body: prepare or directed")
+
 func main() {
 	flag.Parse()
 
@@ -393,6 +397,10 @@ func handleSignatureHelp(msg message) {
 // exchange. Like every position request, it requires the document to have
 // been opened first so tests detect a missing synchronization step.
 func handlePrepareCallHierarchy(msg message) {
+	if *oversizedHierarchyResponse == "prepare" {
+		writeOversizedHierarchyHeader()
+		time.Sleep(time.Hour)
+	}
 	docURI := documentURI(msg.Params)
 	if !openDocs[docURI] {
 		respondError(msg.ID, -32000, fmt.Sprintf("document not open: %s", docURI))
@@ -406,6 +414,10 @@ func handlePrepareCallHierarchy(msg message) {
 }
 
 func handleIncomingCalls(msg message) {
+	if *oversizedHierarchyResponse == "directed" {
+		writeOversizedHierarchyHeader()
+		time.Sleep(time.Hour)
+	}
 	if !acceptDirectedCall(msg) {
 		return
 	}
@@ -418,6 +430,14 @@ func handleIncomingCalls(msg message) {
 		return
 	}
 	respond(msg.ID, *incomingCalls)
+}
+
+func writeOversizedHierarchyHeader() {
+	const declaredBytes = 64<<20 + 1
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	_, _ = fmt.Fprintf(out, "Content-Length: %d\r\n\r\n", declaredBytes)
+	_ = out.Flush()
 }
 
 func generatedDirectedCalls(targetField string, callCount, sitesPerCall int) string {

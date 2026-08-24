@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -258,6 +259,43 @@ var _ = Describe("get_call_hierarchy", func() {
 			result := callHierarchyTool(ctx, session, 1, "incoming")
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 			Expect(decodeToolOutput[callHierarchyToolOutput](result).Roots).To(BeEmpty())
+		})
+	})
+
+	When("the server declares an oversized prepare response", func() {
+		It("rejects the frame before reading its body", func() {
+			writeFile(root, "main.fake", "target()")
+			cfg := fakeConfig(
+				"-call-hierarchy",
+				"-oversized-call-hierarchy-response=prepare")
+			manager := lsp.NewManager(root, cfg.LanguageServers)
+			session := connect(ctx, manager, cfg)
+			callCtx, callCancel := context.WithTimeout(ctx, time.Second)
+			defer callCancel()
+
+			result := callHierarchyTool(callCtx, session, 1, "incoming")
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring(
+				"LSP frame declares 67108865 bytes; maximum is 67108864"))
+		})
+	})
+
+	When("the server declares an oversized directed response", func() {
+		It("rejects the frame before reading its body", func() {
+			writeFile(root, "main.fake", "target()")
+			cfg := fakeConfig(
+				"-call-hierarchy",
+				"-call-hierarchy-roots="+cannedCallHierarchyRoots(1),
+				"-oversized-call-hierarchy-response=directed")
+			manager := lsp.NewManager(root, cfg.LanguageServers)
+			session := connect(ctx, manager, cfg)
+			callCtx, callCancel := context.WithTimeout(ctx, time.Second)
+			defer callCancel()
+
+			result := callHierarchyTool(callCtx, session, 1, "incoming")
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring(
+				"LSP frame declares 67108865 bytes; maximum is 67108864"))
 		})
 	})
 
