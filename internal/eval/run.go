@@ -22,30 +22,40 @@ import (
 type Options struct {
 	FixtureDirectory string
 	ScenarioName     string
-	Repeat           int
 }
 
 type Report struct {
-	ScenarioCount int           `json:"scenario_count"`
-	Results       []Result      `json:"results"`
-	Measurements  []Measurement `json:"measurements,omitempty"`
+	ScenarioCount int       `json:"scenario_count"`
+	Results       []Result  `json:"results"`
+	Summary       []Summary `json:"summary"`
 }
 
 type Result struct {
-	Method    string     `json:"method"`
-	Correct   bool       `json:"correct"`
-	Locations []Location `json:"locations,omitempty"`
-	Error     string     `json:"error,omitempty"`
+	Scenario       string     `json:"scenario"`
+	Method         string     `json:"method"`
+	TruePositives  int        `json:"true_positives"`
+	FalsePositives int        `json:"false_positives"`
+	FalseNegatives int        `json:"false_negatives"`
+	Precision      float64    `json:"precision"`
+	Recall         float64    `json:"recall"`
+	F1             float64    `json:"f1"`
+	ExactMatch     bool       `json:"exact_match"`
+	OutputBytes    int        `json:"output_bytes"`
+	Locations      []Location `json:"locations,omitempty"`
+	Error          string     `json:"error,omitempty"`
 }
 
-type Measurement struct {
-	Method      string `json:"method"`
-	Phase       string `json:"phase"`
-	Repetition  int    `json:"repetition"`
-	ElapsedMS   int64  `json:"elapsed_ms"`
-	OutputBytes int    `json:"output_bytes"`
-	Correct     bool   `json:"correct"`
-	Error       string `json:"error,omitempty"`
+type Summary struct {
+	Method         string  `json:"method"`
+	ScenarioCount  int     `json:"scenario_count"`
+	TruePositives  int     `json:"true_positives"`
+	FalsePositives int     `json:"false_positives"`
+	FalseNegatives int     `json:"false_negatives"`
+	Precision      float64 `json:"precision"`
+	Recall         float64 `json:"recall"`
+	F1             float64 `json:"f1"`
+	ExactMatchRate float64 `json:"exact_match_rate"`
+	OutputBytes    int     `json:"output_bytes"`
 }
 
 type toolLocations struct {
@@ -53,55 +63,49 @@ type toolLocations struct {
 }
 
 func Run(ctx context.Context, options Options) (Report, error) {
-	repeat, err := normalizeRepeat(options.Repeat)
-	if err != nil {
-		return Report{}, err
-	}
 	fixtureDirectory, err := filepath.Abs(options.FixtureDirectory)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve fixture directory: %w", err)
 	}
-	scenario, err := loadScenario(fixtureDirectory, options.ScenarioName)
+	scenarios, err := loadScenarios(fixtureDirectory, options.ScenarioName)
 	if err != nil {
 		return Report{}, err
 	}
 
-	waythroughResult, waythroughMeasurements := runWaythrough(
-		ctx, fixtureDirectory, scenario, repeat)
-	textOnlyResult, textOnlyMeasurements := runTextOnly(
-		ctx, fixtureDirectory, scenario, repeat)
+	waythroughResults := runWaythrough(ctx, fixtureDirectory, scenarios)
+	textOnlyResults := runTextOnly(ctx, fixtureDirectory, scenarios)
+	results := append(waythroughResults, textOnlyResults...)
 	return Report{
-		ScenarioCount: 1,
-		Results:       []Result{waythroughResult, textOnlyResult},
-		Measurements:  append(waythroughMeasurements, textOnlyMeasurements...),
+		ScenarioCount: len(scenarios),
+		Results:       results,
+		Summary:       summarizeResults(results),
 	}, nil
 }
 
 func runWaythrough(
-	ctx context.Context, fixtureDirectory string, scenario Scenario, repeat int,
-) (result Result, measurements []Measurement) {
-	result = Result{Method: "waythrough"}
+	ctx context.Context, fixtureDirectory string, scenarios []Scenario,
+) []Result {
 	runner, err := newWaythroughRunner(ctx, fixtureDirectory)
 	if err != nil {
-		result.Error = err.Error()
-		return result, nil
-	}
-	defer func() {
-		if err := runner.close(); err != nil && result.Error == "" {
-			result.Error = fmt.Sprintf("close Waythrough runner: %v", err)
-			result.Correct = false
+		results := make([]Result, 0, len(scenarios))
+		for _, scenario := range scenarios {
+			results = append(results, failedResult(scenario, "waythrough", err, 0))
 		}
-	}()
+		return results
+	}
 
-	for repetition := 1; repetition <= repeat; repetition++ {
-		run := runner.run(ctx, fixtureDirectory, scenario)
-		result = run.Result
-		measurements = append(measurements, run.measurement("waythrough", repetition))
-		if result.Error != "" {
-			break
+	results := make([]Result, 0, len(scenarios))
+	for _, scenario := range scenarios {
+		results = append(results, runner.run(ctx, fixtureDirectory, scenario))
+	}
+	if err := runner.close(); err != nil {
+		for index := range results {
+			if results[index].Error == "" {
+				results[index].Error = fmt.Sprintf("close Waythrough runner: %v", err)
+			}
 		}
 	}
-	return result, measurements
+	return results
 }
 
 type waythroughRunner struct {
@@ -133,9 +137,7 @@ func newWaythroughRunner(ctx context.Context, fixtureDirectory string) (*waythro
 
 func (runner *waythroughRunner) run(
 	ctx context.Context, fixtureDirectory string, scenario Scenario,
-) measuredRun {
-	start := time.Now()
-	result := Result{Method: "waythrough"}
+) Result {
 	callResult, err := runner.session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "get_definition",
 		Arguments: map[string]any{
@@ -144,18 +146,15 @@ func (runner *waythroughRunner) run(
 	})
 	outputBytes := toolOutputBytes(callResult)
 	if err != nil {
-		result.Error = fmt.Sprintf("call get_definition: %v", err)
-		return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: outputBytes}
+		return failedResult(
+			scenario, "waythrough", fmt.Errorf("call get_definition: %w", err), outputBytes)
 	}
 
 	locations, err := decodeToolLocations(callResult, fixtureDirectory)
 	if err != nil {
-		result.Error = err.Error()
-		return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: outputBytes}
+		return failedResult(scenario, "waythrough", err, outputBytes)
 	}
-	result.Locations = locations
-	result.Correct = sameLocations(locations, scenario.Gold)
-	return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: outputBytes}
+	return locationResult(scenario, "waythrough", locations, outputBytes)
 }
 
 func (runner *waythroughRunner) close() error {
@@ -188,60 +187,87 @@ func toolOutputBytes(result *mcp.CallToolResult) int {
 }
 
 func runTextOnly(
-	ctx context.Context, fixtureDirectory string, scenario Scenario, repeat int,
-) (result Result, measurements []Measurement) {
-	result = Result{Method: "text_only"}
-	for repetition := 1; repetition <= repeat; repetition++ {
-		run := runTextOnlyOnce(ctx, fixtureDirectory, scenario)
-		result = run.Result
-		measurements = append(measurements, run.measurement("text_only", repetition))
-		if result.Error != "" {
-			break
-		}
+	ctx context.Context, fixtureDirectory string, scenarios []Scenario,
+) []Result {
+	results := make([]Result, 0, len(scenarios))
+	for _, scenario := range scenarios {
+		results = append(results, runTextOnlyOnce(ctx, fixtureDirectory, scenario))
 	}
-	return result, measurements
-}
-
-type measuredRun struct {
-	Result      Result
-	Elapsed     time.Duration
-	OutputBytes int
-}
-
-func (run measuredRun) measurement(method string, repetition int) Measurement {
-	return Measurement{
-		Method:      method,
-		Phase:       measurementPhase(repetition),
-		Repetition:  repetition,
-		ElapsedMS:   run.Elapsed.Milliseconds(),
-		OutputBytes: run.OutputBytes,
-		Correct:     run.Result.Correct,
-		Error:       run.Result.Error,
-	}
+	return results
 }
 
 func runTextOnlyOnce(
 	ctx context.Context, fixtureDirectory string, scenario Scenario,
-) measuredRun {
-	start := time.Now()
-	result := Result{Method: "text_only"}
+) Result {
 	command := exec.CommandContext(ctx, "rg", "--line-number", "--column",
 		"--fixed-strings", "--glob", "*.go", scenario.Symbol, ".")
 	command.Dir = fixtureDirectory
 	output, err := command.CombinedOutput()
 	if err != nil && !isNoMatches(err) {
-		result.Error = fmt.Sprintf("run rg: %v\n%s", err, output)
-		return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: len(output)}
+		return failedResult(
+			scenario, "text_only", fmt.Errorf("run rg: %w\n%s", err, output), len(output))
 	}
 
 	locations, err := parseRipgrepLocations(string(output))
 	if err != nil {
-		result.Error = err.Error()
-		return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: len(output)}
+		return failedResult(scenario, "text_only", err, len(output))
 	}
-	result.Locations = locations
-	result.Correct = sameLocations(locations, scenario.Gold)
-	return measuredRun{Result: result, Elapsed: time.Since(start), OutputBytes: len(output)}
+	return locationResult(scenario, "text_only", locations, len(output))
+}
+
+func locationResult(
+	scenario Scenario, method string, locations []Location, outputBytes int,
+) Result {
+	metrics := scoreLocations(locations, scenario.Gold)
+	return Result{
+		Scenario:       scenario.Name,
+		Method:         method,
+		TruePositives:  metrics.TruePositives,
+		FalsePositives: metrics.FalsePositives,
+		FalseNegatives: metrics.FalseNegatives,
+		Precision:      metrics.Precision,
+		Recall:         metrics.Recall,
+		F1:             metrics.F1,
+		ExactMatch:     metrics.ExactMatch,
+		OutputBytes:    outputBytes,
+		Locations:      locations,
+	}
+}
+
+func failedResult(scenario Scenario, method string, runErr error, outputBytes int) Result {
+	result := locationResult(scenario, method, nil, outputBytes)
+	result.Error = runErr.Error()
+	return result
+}
+
+func summarizeResults(results []Result) []Summary {
+	indices := make(map[string]int)
+	summaries := make([]Summary, 0, 2)
+	for _, result := range results {
+		index, ok := indices[result.Method]
+		if !ok {
+			index = len(summaries)
+			indices[result.Method] = index
+			summaries = append(summaries, Summary{Method: result.Method})
+		}
+		summary := &summaries[index]
+		summary.ScenarioCount++
+		summary.TruePositives += result.TruePositives
+		summary.FalsePositives += result.FalsePositives
+		summary.FalseNegatives += result.FalseNegatives
+		summary.OutputBytes += result.OutputBytes
+		if result.ExactMatch {
+			summary.ExactMatchRate++
+		}
+	}
+
+	for index := range summaries {
+		summary := &summaries[index]
+		summary.Precision, summary.Recall, summary.F1 = qualityRates(
+			summary.TruePositives, summary.FalsePositives, summary.FalseNegatives)
+		summary.ExactMatchRate /= float64(summary.ScenarioCount)
+	}
+	return summaries
 }
 
 func isNoMatches(err error) bool {

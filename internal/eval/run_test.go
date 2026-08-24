@@ -32,3 +32,36 @@ func TestManifestRejectsAGoldLocationOutsideTheFixture(t *testing.T) {
 		t.Fatal("a gold location outside the fixture should be rejected")
 	}
 }
+
+func TestTheEvaluatorAggregatesQualityAcrossScenarios(t *testing.T) {
+	results := []Result{
+		{
+			Method:         "waythrough",
+			TruePositives:  1,
+			FalsePositives: 0,
+			FalseNegatives: 0,
+			ExactMatch:     true,
+			OutputBytes:    10,
+		},
+		{
+			Method:         "waythrough",
+			TruePositives:  1,
+			FalsePositives: 1,
+			FalseNegatives: 0,
+			ExactMatch:     false,
+			OutputBytes:    20,
+		},
+	}
+
+	summaries := summarizeResults(results)
+	if len(summaries) != 1 {
+		t.Fatalf("summary count = %d, want 1", len(summaries))
+	}
+	summary := summaries[0]
+	if summary.ScenarioCount != 2 || summary.TruePositives != 2 ||
+		summary.FalsePositives != 1 || summary.FalseNegatives != 0 ||
+		summary.Precision != 2.0/3.0 || summary.Recall != 1 ||
+		summary.F1 != 0.8 || summary.ExactMatchRate != 0.5 || summary.OutputBytes != 30 {
+		t.Fatalf("summary = %#v, want aggregated metrics", summary)
+	}
+}

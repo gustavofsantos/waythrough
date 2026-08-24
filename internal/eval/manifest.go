@@ -11,7 +11,10 @@ import (
 	"strings"
 )
 
-const manifestSizeMax = 1 << 20
+const (
+	manifestSizeMax  = 1 << 20
+	scenarioCountMax = 1000
+)
 
 type Scenario struct {
 	Name   string     `json:"name"`
@@ -28,19 +31,31 @@ type manifest struct {
 }
 
 func loadScenario(fixtureDirectory, scenarioName string) (Scenario, error) {
+	scenarios, err := loadScenarios(fixtureDirectory, scenarioName)
+	if err != nil {
+		return Scenario{}, err
+	}
+	if len(scenarios) != 1 {
+		return Scenario{}, fmt.Errorf(
+			"scenario %q selected %d scenarios", scenarioName, len(scenarios))
+	}
+	return scenarios[0], nil
+}
+
+func loadScenarios(fixtureDirectory, scenarioName string) ([]Scenario, error) {
 	if fixtureDirectory == "" {
-		return Scenario{}, errors.New("fixture directory must not be empty")
+		return nil, errors.New("fixture directory must not be empty")
 	}
 	if scenarioName == "" {
-		return Scenario{}, errors.New("scenario name must not be empty")
+		return nil, errors.New("scenario name must not be empty")
 	}
 
 	manifestPath := filepath.Join(fixtureDirectory, "manifest.json")
 	document, err := readManifest(manifestPath)
 	if err != nil {
-		return Scenario{}, err
+		return nil, err
 	}
-	return findScenario(document, scenarioName)
+	return findScenarios(document, scenarioName)
 }
 
 func readManifest(manifestPath string) (manifest, error) {
@@ -87,22 +102,34 @@ func readManifest(manifestPath string) (manifest, error) {
 	return document, nil
 }
 
-func findScenario(document manifest, scenarioName string) (Scenario, error) {
+func findScenarios(document manifest, scenarioName string) ([]Scenario, error) {
+	if len(document.Scenarios) > scenarioCountMax {
+		return nil, fmt.Errorf("manifest has %d scenarios, maximum is %d",
+			len(document.Scenarios), scenarioCountMax)
+	}
 	seen := make(map[string]struct{}, len(document.Scenarios))
+	validated := make([]Scenario, 0, len(document.Scenarios))
 	for _, scenario := range document.Scenarios {
 		if err := validateScenario(scenario); err != nil {
-			return Scenario{}, err
+			return nil, err
 		}
 		if _, exists := seen[scenario.Name]; exists {
-			return Scenario{}, fmt.Errorf("manifest has duplicate scenario %q", scenario.Name)
+			return nil, fmt.Errorf("manifest has duplicate scenario %q", scenario.Name)
 		}
 		seen[scenario.Name] = struct{}{}
-		if scenario.Name == scenarioName {
-			return scenario, nil
+		validated = append(validated, scenario)
+		if scenarioName != "all" && scenario.Name == scenarioName {
+			return []Scenario{scenario}, nil
 		}
 	}
 
-	return Scenario{}, fmt.Errorf("manifest has no scenario %q", scenarioName)
+	if scenarioName == "all" {
+		if len(validated) == 0 {
+			return nil, errors.New("manifest has no scenarios")
+		}
+		return validated, nil
+	}
+	return nil, fmt.Errorf("manifest has no scenario %q", scenarioName)
 }
 
 func validateScenario(scenario Scenario) error {
