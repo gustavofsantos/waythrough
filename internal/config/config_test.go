@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -28,6 +29,9 @@ language_servers:
   - name: clojure-lsp
     command: clojure-lsp
     args: ["--verbose"]
+    root_markers:
+      - [deps.edn, project.clj]
+      - .git
     filetypes:
       .clj: clojure
 `)
@@ -42,6 +46,10 @@ language_servers:
 			Expect(entry.Name).To(Equal("clojure-lsp"))
 			Expect(entry.Command).To(Equal("clojure-lsp"))
 			Expect(entry.Args).To(Equal([]string{"--verbose"}))
+			Expect(entry.RootMarkers).To(Equal(config.RootMarkers{
+				{"deps.edn", "project.clj"},
+				{".git"},
+			}))
 			Expect(entry.Filetypes).To(Equal(map[string]string{".clj": "clojure"}))
 		})
 	})
@@ -71,6 +79,24 @@ language_server:
 		It("returns a parse error naming the field", func() {
 			_, err := config.Load(path)
 			Expect(err).To(MatchError(ContainSubstring("language_server")))
+		})
+	})
+
+	When("a root marker is not a string", func() {
+		BeforeEach(func() {
+			writeFile(path, `
+language_servers:
+  - name: gopls
+    command: gopls
+    root_markers: [123]
+    filetypes:
+      .go: go
+`)
+		})
+
+		It("rejects the value instead of converting it to a filename", func() {
+			_, err := config.Load(path)
+			Expect(err).To(MatchError(ContainSubstring("must be a string")))
 		})
 	})
 
@@ -199,5 +225,23 @@ var _ = Describe("Validate", func() {
 		Entry("unset", config.Readiness("")),
 		Entry("progress", config.ReadinessProgress),
 		Entry("handshake", config.ReadinessHandshake),
+	)
+
+	DescribeTable("rejects unsafe root markers before a server starts",
+		func(markers config.RootMarkers, message string) {
+			cfg := valid()
+			cfg.LanguageServers[0].RootMarkers = markers
+
+			err := config.Validate(cfg)
+			Expect(err).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("an empty priority group", config.RootMarkers{{}}, "empty group"),
+		Entry("an empty marker", config.RootMarkers{{""}}, "empty marker"),
+		Entry("an absolute marker", config.RootMarkers{{filepath.Join(
+			string(os.PathSeparator), "project")}}, "absolute"),
+		Entry("parent traversal", config.RootMarkers{{"project/../other"}}, "parent traversal"),
+		Entry("too many markers", config.RootMarkers{make([]string, 65)}, "maximum is 64"),
+		Entry("an overlong marker", config.RootMarkers{{strings.Repeat("a", 256)}},
+			"maximum length is 255"),
 	)
 })

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -310,20 +311,25 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	procs := make([]*serverProcess, 0, len(m.procs))
 	for _, proc := range m.procs {
+		if len(proc.entry.RootMarkers) > 0 {
+			continue
+		}
 		procs = append(procs, proc)
 	}
 	m.mu.Unlock()
 
 	for _, proc := range procs {
-		m.startSupervisor(lifetimeCtx, proc)
+		m.startSupervisor(lifetimeCtx, proc, m.root)
 	}
 	return nil
 }
 
 // startSupervisor is the single spawn gate for one configured server. The
 // process-level reservation makes concurrent first requests single-flight.
-func (m *Manager) startSupervisor(ctx context.Context, proc *serverProcess) bool {
-	if ctx == nil || !proc.beginSupervision() {
+func (m *Manager) startSupervisor(
+	ctx context.Context, proc *serverProcess, workspaceRoot string,
+) bool {
+	if ctx == nil || !proc.beginSupervision(workspaceRoot) {
 		return false
 	}
 	go m.runServer(ctx, proc)
@@ -333,11 +339,26 @@ func (m *Manager) startSupervisor(ctx context.Context, proc *serverProcess) bool
 // ensureSupervisor starts proc on the Manager lifetime captured by Start.
 // Eager managers reach this with an existing supervisor, so the same call is
 // safe on every request without branching on startup mode.
-func (m *Manager) ensureSupervisor(proc *serverProcess) bool {
+func (m *Manager) ensureSupervisor(
+	proc *serverProcess, requestedFile string,
+) (bool, error) {
 	m.mu.Lock()
 	ctx := m.lifetimeCtx
 	m.mu.Unlock()
-	return m.startSupervisor(ctx, proc)
+
+	workspaceRoot := proc.workspaceRoot()
+	if workspaceRoot == "" {
+		workspaceRoot = m.root
+		if requestedFile != "" && len(proc.entry.RootMarkers) > 0 {
+			var err error
+			workspaceRoot, err = rootFromMarkers(
+				requestedFile, proc.entry.RootMarkers, m.root)
+			if err != nil {
+				return false, err
+			}
+		}
+	}
+	return m.startSupervisor(ctx, proc, workspaceRoot), nil
 }
 
 // runServer owns proc's process from Start until Shutdown or a done ctx:
@@ -372,7 +393,7 @@ func (m *Manager) runServer(ctx context.Context, proc *serverProcess) {
 				slog.Int("attempt", generation),
 				slog.String("error", truncateForLog(err.Error())))
 		} else {
-			if err := proc.handshake(ctx, m.root); err != nil {
+			if err := proc.handshake(ctx, proc.workspaceRoot()); err != nil {
 				m.logger.Warn("language server handshake failed",
 					slog.String("server", proc.entry.Name),
 					slog.Int("attempt", generation),
@@ -434,7 +455,9 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 	if err != nil {
 		return err
 	}
-	m.ensureSupervisor(proc)
+	if _, err := m.ensureSupervisor(proc, ""); err != nil {
+		return err
+	}
 
 	// Every started server is on attempt 1 or later, so "after attempt 0"
 	// accepts whichever attempt the server happens to be on.
@@ -465,7 +488,10 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	started := m.ensureSupervisor(proc)
+	started, err := m.ensureSupervisor(proc, "")
+	if err != nil {
+		return err
+	}
 	if started || proc.snapshot().status == StatusIdle {
 		// A demand-started server has no process to replace. Starting it is the
 		// only transition that can satisfy the caller's request for a ready one.
@@ -657,6 +683,10 @@ func (m *Manager) CallHierarchy(
 	if err != nil {
 		return nil, err
 	}
+	path := m.resolvePath(file)
+	if _, err := m.ensureSupervisor(proc, path); err != nil {
+		return nil, err
+	}
 	if err := m.WaitReady(ctx, name, m.readinessTimeout); err != nil {
 		return nil, err
 	}
@@ -666,7 +696,6 @@ func (m *Manager) CallHierarchy(
 	if err != nil {
 		return nil, err
 	}
-	path := m.resolvePath(file)
 	if err := proc.syncFileOnAttempt(ctx, path, attempt); err != nil {
 		return nil, fmt.Errorf("sync call hierarchy file: %w", err)
 	}
@@ -873,6 +902,10 @@ func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProces
 	if err != nil {
 		return nil, "", err
 	}
+	path := m.resolvePath(file)
+	if _, err := m.ensureSupervisor(proc, path); err != nil {
+		return nil, "", err
+	}
 	if err := m.WaitReady(ctx, name, m.readinessTimeout); err != nil {
 		return nil, "", err
 	}
@@ -884,7 +917,6 @@ func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProces
 		return nil, "", fmt.Errorf("language server %q reported ready with no connection", name)
 	}
 
-	path := m.resolvePath(file)
 	if err := proc.syncFile(ctx, path); err != nil {
 		return nil, "", fmt.Errorf("sync %s: %w", path, err)
 	}
@@ -903,6 +935,40 @@ func (m *Manager) resolvePath(file string) string {
 		return file
 	}
 	return filepath.Join(m.root, file)
+}
+
+func rootFromMarkers(
+	requestedFile string, markers config.RootMarkers, fallbackRoot string,
+) (string, error) {
+	absoluteFile, err := filepath.Abs(requestedFile)
+	if err != nil {
+		return "", fmt.Errorf("resolve requested file %s: %w", requestedFile, err)
+	}
+	startDirectory := filepath.Dir(absoluteFile)
+
+	for groupIndex, group := range markers {
+		for directory := startDirectory; ; directory = filepath.Dir(directory) {
+			for _, marker := range group {
+				_, err := os.Stat(filepath.Join(directory, marker))
+				switch {
+				case err == nil:
+					return directory, nil
+				case errors.Is(err, os.ErrNotExist):
+					continue
+				default:
+					return "", fmt.Errorf(
+						"inspect root_markers group %d from %s: %w",
+						groupIndex, requestedFile, err)
+				}
+			}
+
+			parent := filepath.Dir(directory)
+			if parent == directory {
+				break
+			}
+		}
+	}
+	return fallbackRoot, nil
 }
 
 func locationsFromDefinitionResult(
@@ -1396,6 +1462,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 // belongs to one attempt, and beginAttempt replaces it.
 type serverProcess struct {
 	entry      config.LanguageServer
+	root       string
 	logger     *slog.Logger
 	restartCh  chan struct{}
 	stoppingCh chan struct{}
@@ -1623,14 +1690,21 @@ func (p *serverProcess) syncFileOnAttempt(
 // beginSupervision reserves this server for one supervisor goroutine. It
 // reports false when a supervisor already owns it, so no two goroutines can
 // ever call exec.Cmd.Wait on the same process.
-func (p *serverProcess) beginSupervision() bool {
+func (p *serverProcess) beginSupervision(workspaceRoot string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.supervised != nil || p.shuttingDown {
 		return false
 	}
+	p.root = workspaceRoot
 	p.supervised = make(chan struct{})
 	return true
+}
+
+func (p *serverProcess) workspaceRoot() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.root
 }
 
 // endSupervision reports that the supervisor goroutine has returned, which

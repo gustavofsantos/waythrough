@@ -70,6 +70,7 @@ var (
 	pullDiagnostics           = flag.Bool("pull-diagnostics", false, "advertise diagnosticProvider in the initialize result, the capability a client must see before it may ask for diagnostics")
 	diagnostics               = flag.String("diagnostics", "", "raw JSON result to answer textDocument/diagnostic with, in the same spirit as -signature-help; empty means a full report holding no diagnostics, which is what a clean file gets")
 	requestLog                = flag.String("request-log", "", "path to a file that receives the method name of every request and notification handled, one per line — lets a test assert Waythrough never sent a request at all, not merely that it disliked the answer")
+	initializeLog             = flag.String("initialize-log", "", "path to a file that receives the initialize params as JSON, one request per line — lets a test verify the workspace root observed by the server")
 	syncLog                   = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
 	instanceLog               = flag.String("instance-log", "", "path to a file that receives this process's pid on every process start, one per line — lets a restart test read that the old process ended and that a different one now serves, which no LSP message reports")
 	stderrLine                = flag.String("stderr-line", "", "text to write to this process's own stderr at startup, followed by a newline — lets a test assert Waythrough surfaces what a language server says about itself, which no LSP message carries")
@@ -187,6 +188,7 @@ var lastInitializeParams json.RawMessage
 
 func handleInitialize(msg message) {
 	lastInitializeParams = msg.Params
+	logInitialize(msg.Params)
 
 	var capabilities []string
 	if *callHierarchyFalse {
@@ -201,6 +203,22 @@ func handleInitialize(msg message) {
 			`{"interFileDependencies":false,"workspaceDiagnostics":false}`)
 	}
 	respond(msg.ID, fmt.Sprintf(`{"capabilities":{%s}}`, strings.Join(capabilities, ",")))
+}
+
+func logInitialize(params json.RawMessage) {
+	if *initializeLog == "" {
+		return
+	}
+	f := openLog("initialize-log", *initializeLog)
+	if _, err := fmt.Fprintln(f, string(params)); err != nil {
+		fmt.Fprintln(os.Stderr, "initialize-log:", err)
+		_ = f.Close()
+		os.Exit(1)
+	}
+	if err := f.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "initialize-log:", err)
+		os.Exit(1)
+	}
 }
 
 func respond(id json.RawMessage, result string) {
