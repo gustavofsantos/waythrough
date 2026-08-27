@@ -31,10 +31,11 @@ tools and check a change.
    falls back. A repository file replaces all defaults rather than merging
    with them.
 3. `internal/cli` starts an `internal/lsp` manager. For built-in defaults,
-   the manager starts a server on the first request routed to it; concurrent
-   first requests share one supervisor. A repository configuration preserves
-   eager startup for every entry. Each server gates requests until it is
-   ready.
+   the manager starts a server on the first request routed to it. Concurrent
+   first requests share one supervisor. A configured entry with root markers
+   also waits for its first file request. An explicit restart can start it at
+   the fallback root instead. An entry without markers preserves eager
+   startup. Each server gates requests until ready.
 4. `internal/cli` builds the MCP server from `internal/editor`. This
    step registers the `get_definition`, `list_references`,
    `rename_symbol`, `signature_help`, `get_call_hierarchy`,
@@ -75,6 +76,7 @@ sequenceDiagram
   A->>W: get_definition(file, line, column)
   W->>W: Route by file extension
   W->>M: Request definition
+  M->>M: Resolve project root from file
   M->>L: Start on demand or await readiness
   L->>R: Read and index source
   L-->>M: Definition locations
@@ -111,11 +113,14 @@ anything.
 ## Server lifecycle
 
 Once a language server starts, one goroutine owns it through shutdown.
-Built-in servers have no goroutine until their first request; the manager's
-single-flight gate lets exactly one such request create the owner. That
-goroutine starts the process, runs the handshake, and waits for the process
-to exit. Then it starts another process, unless the server has exited more
-often than the restart limit allows. A server in that state waits for a
+Built-in servers and configured entries with root markers have no goroutine
+until their first file request. The manager's single-flight gate lets exactly
+one such request create the owner. The owner keeps its selected root across
+process restarts.
+
+The owner goroutine starts the process, runs the handshake, and waits for the
+process to exit. Then it starts another process, unless the server has exited
+more often than the restart limit allows. A server in that state waits for a
 restart without releasing its owner.
 
 This has two results. Every process starts on the context `Start`
@@ -128,9 +133,9 @@ The lifecycle can also be read as this state machine:
 ```mermaid
 stateDiagram-v2
   [*] --> Idle
-  [*] --> Starting: Explicit config starts eagerly
+  [*] --> Starting: Entry without root markers starts eagerly
 
-  Idle --> Starting: First request in demand-start mode
+  Idle --> Starting: First file request or explicit restart
   Starting --> Ready: Handshake and readiness gate
   Ready --> Starting: Recoverable crash
   Ready --> Starting: restart_server
@@ -185,13 +190,19 @@ shows the redirect.
 
 `internal/config/defaults.go` configures clojure-lsp, gopls,
 typescript-language-server for JavaScript and TypeScript, rust-analyzer,
-and pyright-langserver. These five entries are a fixed bound: default
-resolution performs no repository walk, and only a server selected by a
-tool call starts and indexes the workspace.
+and pyright-langserver. These five entries form a fixed bound. Each entry
+uses marker priorities derived from Neovim when file names can represent the
+policy.
 
-Add `waythrough.yaml` to customize startup or use any other language server.
-The next `serve` start reads that file as the complete configuration. See the
-`language_servers` schema in `internal/config/config.go`.
+Root discovery checks at most 64 configured markers at each ancestor.
+It stops at the filesystem root and observes request cancellation. Concurrent
+first requests share one discovery pass. Only a server selected by a tool
+call starts and indexes the workspace.
+
+Add `waythrough.yaml` to customize startup, root markers, or any other
+language server. The next `serve` start reads that file as the complete
+configuration. See the `language_servers` schema in
+`internal/config/config.go`.
 
 ## Add an MCP tool
 

@@ -146,7 +146,8 @@ target to list the rest, or see
 ## Quick start
 
 1. Install the language server for the code you work on. Waythrough has
-   built-in startup and file-routing defaults for these servers:
+   built-in startup, file-routing, and project-root defaults for these
+   servers:
 
    | Languages | Server command |
    | --- | --- |
@@ -157,6 +158,8 @@ target to list the rest, or see
    | Python | `pyright-langserver --stdio` |
 
    The command must be on the `PATH` the coding agent gives Waythrough.
+   Waythrough copies project-root marker lists from the corresponding
+   declarative Neovim LSP configurations.
 
 2. Add Waythrough as an MCP server in your coding agent's config. Have
    the agent start it with the project root as its working directory:
@@ -198,18 +201,46 @@ target to list the rest, or see
    instead, to read first or to place by hand.
 
 4. Add `waythrough.yaml` only when the project needs a different server,
-   command, arguments, environment, readiness gate, or file mapping. The
-   repository file replaces the built-in configuration in full on the next
-   `serve` start. For example, a Go project can customize how gopls starts:
+   command, arguments, environment, readiness gate, root policy, or file
+   mapping. The repository file replaces the built-in configuration in full
+   on the next `serve` start. For example, a Go project can customize how
+   gopls starts:
 
    ```yaml
    language_servers:
      - name: gopls
        command: company-gopls
        args: ["serve", "--company"]
+       root_markers:
+         - go.work
+         - go.mod
+         - .git
        filetypes:
          .go: go
    ```
+
+   `root_markers` follows Neovim's priority rules. Waythrough searches every
+   ancestor for the first list item before it tries the next item. A farther
+   `go.work` takes priority over a nearer `go.mod` in this example.
+   Put markers in a nested list when they have equal priority:
+
+   ```yaml
+   root_markers:
+     - [package-lock.json, yarn.lock, pnpm-lock.yaml]
+     - .git
+   ```
+
+   For an equal-priority group, the nearest ancestor containing any marker
+   wins. The search starts at the file in the first tool request. If no marker
+   matches, Waythrough uses the manager's fallback workspace root. Marker
+   resolution does not read the configuration path. Today `serve` derives the
+   fallback root from that path. This derivation is separate from the marker
+   search.
+
+   A configured entry with `root_markers` does not start during manager
+   startup. Its first file request selects a root. An explicit restart before
+   that request starts the server at the fallback root. An entry without
+   markers preserves eager startup in a repository configuration.
 
    `waythrough init` writes a Clojure starter file. Edit it as needed,
    then run `waythrough validate`. An explicit `--config` path must exist;
