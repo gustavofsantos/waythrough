@@ -16,6 +16,10 @@ var _ = Describe("Default", func() {
 			config.LanguageServer{
 				Name:    "clojure-lsp",
 				Command: "clojure-lsp",
+				RootMarkers: config.RootMarkers{
+					{"project.clj"}, {"deps.edn"}, {"build.boot"},
+					{"shadow-cljs.edn"}, {".git"}, {"bb.edn"},
+				},
 				Filetypes: map[string]string{
 					".clj":  "clojure",
 					".cljc": "clojure",
@@ -24,14 +28,19 @@ var _ = Describe("Default", func() {
 				},
 			},
 			config.LanguageServer{
-				Name:      "gopls",
-				Command:   "gopls",
-				Filetypes: map[string]string{".go": "go"},
+				Name:        "gopls",
+				Command:     "gopls",
+				RootMarkers: config.RootMarkers{{"go.work"}, {"go.mod"}, {".git"}},
+				Filetypes:   map[string]string{".go": "go"},
 			},
 			config.LanguageServer{
 				Name:    "typescript-language-server",
 				Command: "typescript-language-server",
 				Args:    []string{"--stdio"},
+				RootMarkers: config.RootMarkers{
+					{"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"},
+					{".git"},
+				},
 				Filetypes: map[string]string{
 					".cjs": "javascript",
 					".cts": "typescript",
@@ -44,14 +53,19 @@ var _ = Describe("Default", func() {
 				},
 			},
 			config.LanguageServer{
-				Name:      "rust-analyzer",
-				Command:   "rust-analyzer",
-				Filetypes: map[string]string{".rs": "rust"},
+				Name:        "rust-analyzer",
+				Command:     "rust-analyzer",
+				RootMarkers: config.RootMarkers{{"Cargo.toml"}, {"rust-project.json"}, {".git"}},
+				Filetypes:   map[string]string{".rs": "rust"},
 			},
 			config.LanguageServer{
 				Name:    "pyright-langserver",
 				Command: "pyright-langserver",
 				Args:    []string{"--stdio"},
+				RootMarkers: config.RootMarkers{
+					{"pyrightconfig.json"}, {"pyproject.toml"}, {"setup.py"},
+					{"setup.cfg"}, {"requirements.txt"}, {"Pipfile"}, {".git"},
+				},
 				Filetypes: map[string]string{
 					".py":  "python",
 					".pyi": "python",
@@ -64,11 +78,13 @@ var _ = Describe("Default", func() {
 		first := config.Default()
 		first.LanguageServers[0].Command = "company-clojure-lsp"
 		first.LanguageServers[0].Filetypes[".clj"] = "company-clojure"
+		first.LanguageServers[1].RootMarkers[0][0] = "company.go.work"
 		first.LanguageServers[2].Args[0] = "--socket"
 
 		second := config.Default()
 		Expect(second.LanguageServers[0].Command).To(Equal("clojure-lsp"))
 		Expect(second.LanguageServers[0].Filetypes[".clj"]).To(Equal("clojure"))
+		Expect(second.LanguageServers[1].RootMarkers[0][0]).To(Equal("go.work"))
 		Expect(second.LanguageServers[2].Args).To(Equal([]string{"--stdio"}))
 	})
 })

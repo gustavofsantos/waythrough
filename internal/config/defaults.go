@@ -8,6 +8,14 @@ func Default() Config {
 		{
 			Name:    "clojure-lsp",
 			Command: "clojure-lsp",
+			RootMarkers: RootMarkers{
+				{"project.clj"},
+				{"deps.edn"},
+				{"build.boot"},
+				{"shadow-cljs.edn"},
+				{".git"},
+				{"bb.edn"},
+			},
 			Filetypes: map[string]string{
 				".clj":  "clojure",
 				".cljc": "clojure",
@@ -16,14 +24,19 @@ func Default() Config {
 			},
 		},
 		{
-			Name:      "gopls",
-			Command:   "gopls",
-			Filetypes: map[string]string{".go": "go"},
+			Name:        "gopls",
+			Command:     "gopls",
+			RootMarkers: RootMarkers{{"go.work"}, {"go.mod"}, {".git"}},
+			Filetypes:   map[string]string{".go": "go"},
 		},
 		{
 			Name:    "typescript-language-server",
 			Command: "typescript-language-server",
 			Args:    []string{"--stdio"},
+			RootMarkers: RootMarkers{
+				{"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"},
+				{".git"},
+			},
 			Filetypes: map[string]string{
 				".cjs": "javascript",
 				".cts": "typescript",
@@ -36,14 +49,24 @@ func Default() Config {
 			},
 		},
 		{
-			Name:      "rust-analyzer",
-			Command:   "rust-analyzer",
-			Filetypes: map[string]string{".rs": "rust"},
+			Name:        "rust-analyzer",
+			Command:     "rust-analyzer",
+			RootMarkers: RootMarkers{{"Cargo.toml"}, {"rust-project.json"}, {".git"}},
+			Filetypes:   map[string]string{".rs": "rust"},
 		},
 		{
 			Name:    "pyright-langserver",
 			Command: "pyright-langserver",
 			Args:    []string{"--stdio"},
+			RootMarkers: RootMarkers{
+				{"pyrightconfig.json"},
+				{"pyproject.toml"},
+				{"setup.py"},
+				{"setup.cfg"},
+				{"requirements.txt"},
+				{"Pipfile"},
+				{".git"},
+			},
 			Filetypes: map[string]string{
 				".py":  "python",
 				".pyi": "python",
