@@ -167,6 +167,66 @@ func TestTheSuiteReportsPerCaseAndAggregateQualityMetrics(t *testing.T) {
 	}
 }
 
+func TestTheNavigationSuiteSeparatesSemanticAnswersFromTextNoise(t *testing.T) {
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Fatalf("gopls is required for the eval acceptance test: %v", err)
+	}
+
+	repositoryRoot := repositoryRoot(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	command := exec.CommandContext(ctx, "go", "run", "./cmd/waythrough-eval",
+		"--fixture", "evals/fixtures/go-navigation",
+		"--scenario", "all",
+		"--format", "json")
+	command.Dir = repositoryRoot
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("navigation evaluation failed: %v\n%s", err, output)
+	}
+
+	var report qualityEvaluationReport
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatalf("evaluation output is not JSON: %v\n%s", err, output)
+	}
+	wantScenarios := []string{
+		"definition.cross_file_noise",
+		"definition.shadowed_local",
+		"references.cross_file_noise",
+	}
+	if report.ScenarioCount != len(wantScenarios) || len(report.Results) != len(wantScenarios)*2 {
+		t.Fatalf("scenario_count/results = %d/%d, want %d/%d",
+			report.ScenarioCount, len(report.Results), len(wantScenarios), len(wantScenarios)*2)
+	}
+
+	results := make(map[string]qualityEvaluationResult, len(report.Results))
+	for _, result := range report.Results {
+		results[result.Scenario+":"+result.Method] = result
+	}
+	for _, scenario := range wantScenarios {
+		semantic := results[scenario+":waythrough"]
+		if !semantic.ExactMatch || semantic.FalsePositives != 0 || semantic.FalseNegatives != 0 {
+			t.Fatalf("Waythrough result for %q = %#v, want an exact semantic answer", scenario, semantic)
+		}
+		textOnly := results[scenario+":text_only"]
+		if textOnly.ExactMatch || textOnly.FalsePositives == 0 {
+			t.Fatalf("text-only result for %q = %#v, want false positives", scenario, textOnly)
+		}
+	}
+
+	summaries := make(map[string]qualityEvaluationSummary, len(report.Summary))
+	for _, summary := range report.Summary {
+		summaries[summary.Method] = summary
+	}
+	if summaries["waythrough"].ExactMatchRate != 1 {
+		t.Fatalf("Waythrough exact-match rate = %v, want 1", summaries["waythrough"].ExactMatchRate)
+	}
+	if summaries["text_only"].ExactMatchRate >= 1 {
+		t.Fatalf("text-only exact-match rate = %v, want less than 1", summaries["text_only"].ExactMatchRate)
+	}
+}
+
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	workingDirectory, err := os.Getwd()
