@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -92,6 +93,26 @@ var _ = Describe("root markers", func() {
 		}
 		Expect(json.Unmarshal(bytes.TrimSpace(data), &params)).To(Succeed())
 		Expect(params.RootURI).To(Equal("file://" + filepath.ToSlash(workspace)))
+	})
+
+	It("stops root discovery when the request is canceled", func() {
+		workspace := GinkgoT().TempDir()
+		sourceFile := filepath.Join(workspace, "Main.fake")
+		Expect(os.WriteFile(sourceFile, []byte("main"), 0o644)).To(Succeed())
+
+		entry := fakeEntry()
+		entry.RootMarkers = config.RootMarkers{{"missing.project-marker"}}
+		manager := lsp.NewManager(workspace, []config.LanguageServer{entry})
+		Expect(manager.Start(context.Background())).To(Succeed())
+		DeferCleanup(func() {
+			Expect(manager.Shutdown(context.Background())).To(Succeed())
+		})
+
+		requestContext, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := manager.Definition(requestContext, "fake", sourceFile, 1, 1)
+		Expect(errors.Is(err, context.Canceled)).To(BeTrue())
+		Expect(manager.Status("fake")).To(Equal(lsp.StatusIdle))
 	})
 
 	It("keeps one built-in root through concurrent start and restart", func(ctx SpecContext) {

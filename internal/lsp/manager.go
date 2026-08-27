@@ -340,25 +340,25 @@ func (m *Manager) startSupervisor(
 // Eager managers reach this with an existing supervisor, so the same call is
 // safe on every request without branching on startup mode.
 func (m *Manager) ensureSupervisor(
-	proc *serverProcess, requestedFile string,
+	ctx context.Context, proc *serverProcess, requestedFile string,
 ) (bool, error) {
 	m.mu.Lock()
-	ctx := m.lifetimeCtx
+	lifetimeCtx := m.lifetimeCtx
 	m.mu.Unlock()
 
-	workspaceRoot := proc.workspaceRoot()
-	if workspaceRoot == "" {
-		workspaceRoot = m.root
+	workspaceRoot, err := proc.selectWorkspaceRoot(ctx, func(ctx context.Context) (string, error) {
 		if requestedFile != "" && len(proc.entry.RootMarkers) > 0 {
-			var err error
-			workspaceRoot, err = rootFromMarkers(
-				requestedFile, proc.entry.RootMarkers, m.root)
-			if err != nil {
-				return false, err
-			}
+			return rootFromMarkers(ctx, requestedFile, proc.entry.RootMarkers, m.root)
 		}
+		return m.root, nil
+	})
+	if err != nil {
+		return false, err
 	}
-	return m.startSupervisor(ctx, proc, workspaceRoot), nil
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("start language server after root discovery: %w", err)
+	}
+	return m.startSupervisor(lifetimeCtx, proc, workspaceRoot), nil
 }
 
 // runServer owns proc's process from Start until Shutdown or a done ctx:
@@ -455,7 +455,7 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 	if err != nil {
 		return err
 	}
-	if _, err := m.ensureSupervisor(proc, ""); err != nil {
+	if _, err := m.ensureSupervisor(ctx, proc, ""); err != nil {
 		return err
 	}
 
@@ -488,7 +488,7 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	started, err := m.ensureSupervisor(proc, "")
+	started, err := m.ensureSupervisor(ctx, proc, "")
 	if err != nil {
 		return err
 	}
@@ -684,7 +684,7 @@ func (m *Manager) CallHierarchy(
 		return nil, err
 	}
 	path := m.resolvePath(file)
-	if _, err := m.ensureSupervisor(proc, path); err != nil {
+	if _, err := m.ensureSupervisor(ctx, proc, path); err != nil {
 		return nil, err
 	}
 	if err := m.WaitReady(ctx, name, m.readinessTimeout); err != nil {
@@ -903,7 +903,7 @@ func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProces
 		return nil, "", err
 	}
 	path := m.resolvePath(file)
-	if _, err := m.ensureSupervisor(proc, path); err != nil {
+	if _, err := m.ensureSupervisor(ctx, proc, path); err != nil {
 		return nil, "", err
 	}
 	if err := m.WaitReady(ctx, name, m.readinessTimeout); err != nil {
@@ -938,8 +938,11 @@ func (m *Manager) resolvePath(file string) string {
 }
 
 func rootFromMarkers(
-	requestedFile string, markers config.RootMarkers, fallbackRoot string,
+	ctx context.Context, requestedFile string, markers config.RootMarkers, fallbackRoot string,
 ) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("discover root from %s: %w", requestedFile, err)
+	}
 	absoluteFile, err := filepath.Abs(requestedFile)
 	if err != nil {
 		return "", fmt.Errorf("resolve requested file %s: %w", requestedFile, err)
@@ -949,7 +952,14 @@ func rootFromMarkers(
 	for groupIndex, group := range markers {
 		for directory := startDirectory; ; directory = filepath.Dir(directory) {
 			for _, marker := range group {
+				if err := ctx.Err(); err != nil {
+					return "", fmt.Errorf("discover root from %s: %w", requestedFile, err)
+				}
 				_, err := os.Stat(filepath.Join(directory, marker))
+				if contextErr := ctx.Err(); contextErr != nil {
+					return "", fmt.Errorf(
+						"discover root from %s: %w", requestedFile, contextErr)
+				}
 				switch {
 				case err == nil:
 					return directory, nil
@@ -1463,6 +1473,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 type serverProcess struct {
 	entry      config.LanguageServer
 	root       string
+	rootChoice *workspaceRootSelection
 	logger     *slog.Logger
 	restartCh  chan struct{}
 	stoppingCh chan struct{}
@@ -1490,6 +1501,12 @@ type serverProcess struct {
 	shuttingDown bool
 	supervised   chan struct{}
 	openFiles    map[string]openFile
+}
+
+type workspaceRootSelection struct {
+	done chan struct{}
+	root string
+	err  error
 }
 
 // serverAttempt identifies one concrete LSP connection. A generation alone
@@ -1705,6 +1722,55 @@ func (p *serverProcess) workspaceRoot() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.root
+}
+
+// selectWorkspaceRoot lets one first request inspect the filesystem. Other
+// first requests wait for that result instead of repeating the same walk.
+// A failed selection is shared with current waiters, but a later request can
+// retry a transient filesystem failure.
+func (p *serverProcess) selectWorkspaceRoot(
+	ctx context.Context, resolve func(context.Context) (string, error),
+) (string, error) {
+	for {
+		p.mu.Lock()
+		if p.root != "" {
+			root := p.root
+			p.mu.Unlock()
+			return root, nil
+		}
+		if selection := p.rootChoice; selection != nil {
+			p.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("wait for workspace root: %w", ctx.Err())
+			case <-selection.done:
+				selectionCanceled := errors.Is(selection.err, context.Canceled) ||
+					errors.Is(selection.err, context.DeadlineExceeded)
+				if selectionCanceled && ctx.Err() == nil {
+					continue
+				}
+				return selection.root, selection.err
+			}
+		}
+
+		selection := &workspaceRootSelection{done: make(chan struct{})}
+		p.rootChoice = selection
+		p.mu.Unlock()
+
+		root, err := resolve(ctx)
+
+		p.mu.Lock()
+		if err == nil {
+			p.root = root
+		}
+		selection.root = root
+		selection.err = err
+		p.rootChoice = nil
+		close(selection.done)
+		p.mu.Unlock()
+
+		return root, err
+	}
 }
 
 // endSupervision reports that the supervisor goroutine has returned, which
