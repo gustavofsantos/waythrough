@@ -9,19 +9,18 @@ import (
 func newValidateCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "validate",
-		Short: "Validate a waythrough.yaml config file",
+		Short: "Validate the user waythrough config file",
 	}
 
-	configPath := configFlag(cmd, "validate")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		return runValidate(*configPath)
+		return runValidate()
 	}
 
 	return cmd
 }
 
-func runValidate(configPath string) error {
-	cfg, err := config.Load(configPath)
+func runValidate() error {
+	cfg, _, err := loadUserConfig()
 	if err != nil {
 		return err
 	}

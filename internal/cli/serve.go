@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -24,45 +23,26 @@ import (
 // them and returns.
 const shutdownGrace = 10 * time.Second
 
-type configPathSource int
-
-const (
-	implicitConfigPath configPathSource = iota
-	explicitConfigPath
-)
-
-type serveConfig struct {
-	config.Config
-	usesBuiltInDefaults bool
-}
-
 func newServeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the Waythrough MCP server over stdio",
 	}
 
-	configPath := configFlag(cmd, "serve from")
 	debug := debugFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		pathSource := implicitConfigPath
-		if cmd.Flags().Changed("config") {
-			pathSource = explicitConfigPath
-		}
-		return runServe(*configPath, pathSource, newLogger(cmd.ErrOrStderr(), *debug))
+		return runServe(newLogger(cmd.ErrOrStderr(), *debug))
 	}
 
 	return cmd
 }
 
-func runServe(
-	configPath string, pathSource configPathSource, logger *slog.Logger,
-) error {
-	loaded, err := loadServeConfig(configPath, pathSource)
+func runServe(logger *slog.Logger) error {
+	cfg, configPath, err := loadUserConfig()
 	if err != nil {
 		return err
 	}
-	if err := config.Validate(loaded.Config); err != nil {
+	if err := config.Validate(cfg); err != nil {
 		return err
 	}
 
@@ -70,25 +50,25 @@ func runServe(
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", configPath, err)
 	}
-	root := filepath.Dir(absConfigPath)
+	root, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve workspace root: %w", err)
+	}
 
 	// The language-server subprocesses live for as long as serve runs, not
 	// for as long as any one MCP session does: only Shutdown below ends
 	// them, never the signal-aware context the MCP transport listens on.
-	managerOptions := []lsp.Option{lsp.WithLogger(logger)}
-	if loaded.usesBuiltInDefaults {
-		managerOptions = append(managerOptions, lsp.WithDemandStart())
-	}
-	manager := lsp.NewManager(root, loaded.LanguageServers, managerOptions...)
+	managerOptions := []lsp.Option{lsp.WithLogger(logger), lsp.WithDemandStart()}
+	manager := lsp.NewManager(root, cfg.LanguageServers, managerOptions...)
 	if err := manager.Start(context.Background()); err != nil {
 		return err
 	}
-	logServeStarted(logger, loaded, absConfigPath, root)
+	logServeStarted(logger, cfg, absConfigPath, root)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := editor.New(manager, loaded.Config, logger)
+	server := editor.New(manager, cfg, logger)
 	runErr := server.Run(ctx, &mcp.StdioTransport{})
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
@@ -102,32 +82,13 @@ func runServe(
 }
 
 func logServeStarted(
-	logger *slog.Logger, loaded serveConfig, absConfigPath, root string,
+	logger *slog.Logger, cfg config.Config, absConfigPath, root string,
 ) {
-	configSource := "file"
 	logAttributes := []any{
 		slog.String("root", root),
-		slog.Int("language_servers", len(loaded.LanguageServers)),
+		slog.Int("language_servers", len(cfg.LanguageServers)),
+		slog.String("config", absConfigPath),
+		slog.String("config_source", "user"),
 	}
-	if loaded.usesBuiltInDefaults {
-		configSource = "built_in"
-	} else {
-		logAttributes = append(logAttributes, slog.String("config", absConfigPath))
-	}
-	logAttributes = append(logAttributes, slog.String("config_source", configSource))
 	logger.Debug("waythrough serving", logAttributes...)
-}
-
-// loadServeConfig uses built-ins only for the implicit waythrough.yaml path.
-// An explicit --config path is a user assertion that the file must exist, so
-// silently replacing a typo there with defaults would start the wrong servers.
-func loadServeConfig(configPath string, pathSource configPathSource) (serveConfig, error) {
-	cfg, err := config.Load(configPath)
-	if err == nil {
-		return serveConfig{Config: cfg}, nil
-	}
-	if pathSource == implicitConfigPath && errors.Is(err, os.ErrNotExist) {
-		return serveConfig{Config: config.Default(), usesBuiltInDefaults: true}, nil
-	}
-	return serveConfig{}, err
 }

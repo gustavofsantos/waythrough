@@ -21,12 +21,15 @@ const defaultConfig = `language_servers:
 func newInitCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Create a waythrough.yaml config file",
+		Short: "Create the user waythrough config file",
 	}
 
-	configPath := configFlag(cmd, "create")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		return runInit(*configPath)
+		configPath, err := userConfigPath()
+		if err != nil {
+			return err
+		}
+		return runInit(configPath)
 	}
 
 	return cmd

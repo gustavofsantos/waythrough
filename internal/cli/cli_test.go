@@ -42,7 +42,9 @@ var _ = Describe("waythrough CLI", func() {
 	)
 
 	BeforeEach(func() {
-		configPath = filepath.Join(GinkgoT().TempDir(), "waythrough.yaml")
+		configPath = filepath.Join(GinkgoT().TempDir(), ".waythrough.yaml")
+		DeferCleanup(func() { _ = os.Unsetenv("HOME") })
+		Expect(os.Setenv("HOME", filepath.Dir(configPath))).To(Succeed())
 		stdout = &bytes.Buffer{}
 		stderr = &bytes.Buffer{}
 	})
@@ -54,7 +56,7 @@ var _ = Describe("waythrough CLI", func() {
 	Describe("init", func() {
 		When("no config file exists at the target path", func() {
 			It("creates a config file with one example language server", func() {
-				code := run("init", "--config", configPath)
+				code := run("init")
 				Expect(code).To(Equal(0))
 
 				data, err := os.ReadFile(configPath)
@@ -72,7 +74,7 @@ var _ = Describe("waythrough CLI", func() {
 			})
 
 			It("refuses to overwrite the file and exits non-zero", func() {
-				code := run("init", "--config", configPath)
+				code := run("init")
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).To(ContainSubstring(configPath))
 
@@ -90,7 +92,7 @@ var _ = Describe("waythrough CLI", func() {
 			})
 
 			It("exits non-zero and explains that the configuration is unusable", func() {
-				code := run("validate", "--config", configPath)
+				code := run("validate")
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).To(ContainSubstring("no language servers"))
 			})
@@ -108,7 +110,7 @@ language_servers:
 			})
 
 			It("exits zero", func() {
-				Expect(run("validate", "--config", configPath)).To(Equal(0))
+				Expect(run("validate")).To(Equal(0))
 			})
 		})
 
@@ -123,7 +125,7 @@ language_servers:
 			})
 
 			It("exits non-zero and names the missing field and the entry", func() {
-				code := run("validate", "--config", configPath)
+				code := run("validate")
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).To(ContainSubstring("command"))
 				Expect(stderr.String()).To(ContainSubstring("clojure-lsp"))
@@ -143,7 +145,7 @@ language_servers:
 			})
 
 			It("exits non-zero and names the invalid value", func() {
-				code := run("validate", "--config", configPath)
+				code := run("validate")
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).To(ContainSubstring("eager"))
 			})
@@ -155,7 +157,7 @@ language_servers:
 			})
 
 			It("exits non-zero and reports a parse error", func() {
-				code := run("validate", "--config", configPath)
+				code := run("validate")
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).NotTo(BeEmpty())
 			})
@@ -165,7 +167,7 @@ language_servers:
 			BeforeEach(func() { writeConfigFile(configPath, twoServersOneExtension) })
 
 			It("exits non-zero and names the extension and both entries", func() {
-				code := run("validate", "--config", configPath)
+				code := run("validate")
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).To(ContainSubstring("already claimed"))
 				Expect(stderr.String()).To(ContainSubstring(".clj"))
@@ -186,7 +188,7 @@ language_servers:
 			})
 
 			It("refuses to start before opening the MCP transport", func() {
-				code := run("serve", "--config", configPath)
+				code := run("serve")
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).To(ContainSubstring("no language servers"))
 			})
@@ -201,7 +203,7 @@ language_servers:
 			// silence, and an agent gets definitions from whichever entry came
 			// last. serve must refuse before it spawns a single subprocess.
 			It("refuses to start, and names the extension and both entries", func() {
-				code := run("serve", "--config", configPath)
+				code := run("serve")
 				Expect(code).NotTo(Equal(0))
 				Expect(stderr.String()).To(ContainSubstring("already claimed"))
 				Expect(stderr.String()).To(ContainSubstring(".clj"))
@@ -219,7 +221,9 @@ var _ = Describe("serve --debug", func() {
 	)
 
 	BeforeEach(func() {
-		configPath = filepath.Join(GinkgoT().TempDir(), "waythrough.yaml")
+		configPath = filepath.Join(GinkgoT().TempDir(), ".waythrough.yaml")
+		DeferCleanup(func() { _ = os.Unsetenv("HOME") })
+		Expect(os.Setenv("HOME", filepath.Dir(configPath))).To(Succeed())
 		stderr = &bytes.Buffer{}
 	})
 
@@ -231,7 +235,7 @@ var _ = Describe("serve --debug", func() {
 
 		It("accepts the flag and still refuses to start", func() {
 			code := cli.Execute(
-				[]string{"serve", "--config", configPath, "--debug"},
+				[]string{"serve", "--debug"},
 				&bytes.Buffer{}, stderr)
 
 			Expect(code).NotTo(Equal(0))

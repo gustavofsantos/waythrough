@@ -233,8 +233,7 @@ func WithLogger(logger *slog.Logger) Option {
 
 // WithDemandStart makes Start record the manager lifetime without spawning
 // every configured server. The first waiter for a server starts its one
-// supervisor. This is intended for built-in configurations, where starting
-// unrelated installed servers would make each of them index the same root.
+// supervisor, so unrelated configured servers do not index the same root.
 func WithDemandStart() Option {
 	return func(m *Manager) { m.demandStart = true }
 }

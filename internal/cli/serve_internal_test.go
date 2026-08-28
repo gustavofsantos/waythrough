@@ -10,106 +10,89 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/config"
 )
 
-func TestImplicitMissingConfigUsesDefaults(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "waythrough.yaml")
+func TestValidateUsesOnlyUserConfiguration(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(workspace)
 
-	cfg, err := loadServeConfig(path, implicitConfigPath)
-	if err != nil {
-		t.Fatalf("load implicit config: %v", err)
-	}
-	if len(cfg.LanguageServers) != 5 {
-		t.Fatalf("got %d default servers, want 5", len(cfg.LanguageServers))
-	}
-	if !cfg.usesBuiltInDefaults {
-		t.Fatal("implicit missing config was not marked for demand startup")
-	}
-}
-
-func TestRepositoryConfigReplacesDefaultsWhenItAppears(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "waythrough.yaml")
-	before, err := loadServeConfig(path, implicitConfigPath)
-	if err != nil {
-		t.Fatalf("load defaults before repository config exists: %v", err)
-	}
-	if len(before.LanguageServers) != 5 {
-		t.Fatalf("got %d default servers before override, want 5",
-			len(before.LanguageServers))
-	}
-
-	custom := []byte(`language_servers:
-  - name: company-gopls
-    command: company-gopls
-    args: ["serve", "--company"]
+	projectConfig := []byte(`language_servers:
+  - name: project-gopls
+    command: project-gopls
     filetypes:
       .go: go
 `)
-	if err := os.WriteFile(path, custom, 0o600); err != nil {
-		t.Fatalf("write custom config: %v", err)
+	if err := os.WriteFile(filepath.Join(workspace, "waythrough.yaml"),
+		projectConfig, 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
 	}
 
-	cfg, err := loadServeConfig(path, implicitConfigPath)
+	var stderr bytes.Buffer
+	code := Execute([]string{"validate"}, &bytes.Buffer{}, &stderr)
+	if code == 0 {
+		t.Fatal("validate accepted a project config without the user config")
+	}
+	wantPath := filepath.Join(home, ".waythrough.yaml")
+	if !strings.Contains(stderr.String(), wantPath) {
+		t.Fatalf("error %q does not name user config %s", stderr.String(), wantPath)
+	}
+	if !strings.Contains(stderr.String(), "waythrough init") {
+		t.Fatalf("error %q does not explain how to create user config", stderr.String())
+	}
+}
+
+func TestUserConfigurationLivesInTheUserHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "developer")
+	t.Setenv("HOME", home)
+
+	path, err := userConfigPath()
 	if err != nil {
-		t.Fatalf("load repository config: %v", err)
+		t.Fatalf("resolve user config path: %v", err)
 	}
-	if len(cfg.LanguageServers) != 1 {
-		t.Fatalf("got %d servers, want only the repository entry", len(cfg.LanguageServers))
-	}
-	if cfg.usesBuiltInDefaults {
-		t.Fatal("repository config was incorrectly marked as built-in defaults")
-	}
-	server := cfg.LanguageServers[0]
-	if server.Name != "company-gopls" || server.Command != "company-gopls" {
-		t.Fatalf("loaded server %#v, want repository override", server)
+
+	want := filepath.Join(home, ".waythrough.yaml")
+	if path != want {
+		t.Fatalf("got config path %s, want %s", path, want)
 	}
 }
 
-func TestExplicitMissingConfigIsAnError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "company-waythrough.yaml")
-
-	if _, err := loadServeConfig(path, explicitConfigPath); err == nil {
-		t.Fatal("load explicit missing config succeeded, want an error")
+func TestConfigPathFlagIsNotSupported(t *testing.T) {
+	var stderr bytes.Buffer
+	code := Execute([]string{"validate", "--config", "/tmp/other.yaml"},
+		&bytes.Buffer{}, &stderr)
+	if code == 0 {
+		t.Fatal("validate accepted the removed --config flag")
+	}
+	if !strings.Contains(stderr.String(), "unknown flag: --config") {
+		t.Fatalf("error %q does not reject --config", stderr.String())
 	}
 }
 
-func TestInvalidRepositoryConfigIsAnError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "waythrough.yaml")
+func TestInvalidUserConfigIsAnError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".waythrough.yaml")
 	if err := os.WriteFile(path, []byte("language_servers: [\n"), 0o600); err != nil {
 		t.Fatalf("write invalid config: %v", err)
 	}
 
-	if _, err := loadServeConfig(path, implicitConfigPath); err == nil {
-		t.Fatal("load invalid repository config succeeded, want an error")
+	if _, _, err := loadUserConfig(); err == nil {
+		t.Fatal("load invalid user config succeeded, want an error")
 	}
 }
 
-func TestServeStartLogNamesBuiltInConfiguration(t *testing.T) {
+func TestServeStartLogNamesUserConfiguration(t *testing.T) {
 	var output bytes.Buffer
-	loaded := serveConfig{Config: config.Default(), usesBuiltInDefaults: true}
+	cfg := config.Default()
 
-	logServeStarted(newLogger(&output, true), loaded,
-		"/project/waythrough.yaml", "/project")
+	logServeStarted(newLogger(&output, true), cfg,
+		"/home/developer/.waythrough.yaml", "/project")
 
 	record := output.String()
-	if !strings.Contains(record, "config_source=built_in") {
-		t.Fatalf("startup record %q does not name built-in configuration", record)
+	if !strings.Contains(record, "config_source=user") {
+		t.Fatalf("startup record %q does not name user configuration", record)
 	}
-	if strings.Contains(record, " config=") {
-		t.Fatalf("startup record %q claims a config file was loaded", record)
-	}
-}
-
-func TestServeStartLogNamesRepositoryConfiguration(t *testing.T) {
-	var output bytes.Buffer
-	loaded := serveConfig{Config: config.Default()}
-
-	logServeStarted(newLogger(&output, true), loaded,
-		"/project/waythrough.yaml", "/project")
-
-	record := output.String()
-	if !strings.Contains(record, "config_source=file") {
-		t.Fatalf("startup record %q does not name file configuration", record)
-	}
-	if !strings.Contains(record, "config=/project/waythrough.yaml") {
+	if !strings.Contains(record, "config=/home/developer/.waythrough.yaml") {
 		t.Fatalf("startup record %q does not name the loaded file", record)
 	}
 }
