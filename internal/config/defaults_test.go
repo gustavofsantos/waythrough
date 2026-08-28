@@ -7,9 +7,9 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/config"
 )
 
-var _ = Describe("Default", func() {
+var _ = Describe("Presets", func() {
 	It("configures the supported common language servers", func() {
-		cfg := config.Default()
+		cfg := config.Config{LanguageServers: config.Presets()}
 
 		Expect(config.Validate(cfg)).To(Succeed())
 		Expect(cfg.LanguageServers).To(ConsistOf(
@@ -75,16 +75,16 @@ var _ = Describe("Default", func() {
 	})
 
 	It("returns configuration the caller can mutate without changing later defaults", func() {
-		first := config.Default()
-		first.LanguageServers[0].Command = "company-clojure-lsp"
-		first.LanguageServers[0].Filetypes[".clj"] = "company-clojure"
-		first.LanguageServers[1].RootMarkers[0][0] = "company.go.work"
-		first.LanguageServers[2].Args[0] = "--socket"
+		first := config.Presets()
+		first[0].Command = "company-clojure-lsp"
+		first[0].Filetypes[".clj"] = "company-clojure"
+		first[1].RootMarkers[0][0] = "company.go.work"
+		first[2].Args[0] = "--socket"
 
-		second := config.Default()
-		Expect(second.LanguageServers[0].Command).To(Equal("clojure-lsp"))
-		Expect(second.LanguageServers[0].Filetypes[".clj"]).To(Equal("clojure"))
-		Expect(second.LanguageServers[1].RootMarkers[0][0]).To(Equal("go.work"))
-		Expect(second.LanguageServers[2].Args).To(Equal([]string{"--stdio"}))
+		second := config.Presets()
+		Expect(second[0].Command).To(Equal("clojure-lsp"))
+		Expect(second[0].Filetypes[".clj"]).To(Equal("clojure"))
+		Expect(second[1].RootMarkers[0][0]).To(Equal("go.work"))
+		Expect(second[2].Args).To(Equal([]string{"--stdio"}))
 	})
 })

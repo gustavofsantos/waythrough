@@ -50,7 +50,7 @@ var _ = Describe("waythrough CLI", func() {
 	})
 
 	run := func(args ...string) int {
-		return cli.Execute(args, stdout, stderr)
+		return cli.ExecuteWithInput(args, bytes.NewBufferString("1\n"), stdout, stderr)
 	}
 
 	Describe("init", func() {

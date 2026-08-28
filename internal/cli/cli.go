@@ -4,6 +4,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -11,8 +12,16 @@ import (
 // Execute runs the waythrough CLI with args and returns the process exit
 // code. It writes normal output to stdout and errors to stderr.
 func Execute(args []string, stdout, stderr io.Writer) int {
+	return ExecuteWithInput(args, os.Stdin, stdout, stderr)
+}
+
+// ExecuteWithInput runs the CLI with an explicit input stream. The main
+// binary uses Execute, while tests and other callers can drive interactive
+// commands without replacing the process stdin.
+func ExecuteWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	root := newRootCommand()
 	root.SetArgs(args)
+	root.SetIn(stdin)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.SilenceUsage = true

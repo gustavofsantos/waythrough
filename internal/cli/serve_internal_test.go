@@ -83,7 +83,7 @@ func TestInvalidUserConfigIsAnError(t *testing.T) {
 
 func TestServeStartLogNamesUserConfiguration(t *testing.T) {
 	var output bytes.Buffer
-	cfg := config.Default()
+	cfg := config.Config{LanguageServers: config.Presets()}
 
 	logServeStarted(newLogger(&output, true), cfg,
 		"/home/developer/.waythrough.yaml", "/project")

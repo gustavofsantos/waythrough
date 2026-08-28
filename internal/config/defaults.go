@@ -1,10 +1,10 @@
 package config
 
-// Default returns Waythrough's built-in configuration for common language
-// servers. Each call owns its maps and slices, so a caller may customize the
-// result without changing a later call's defaults.
-func Default() Config {
-	return Config{LanguageServers: []LanguageServer{
+// Presets returns the language-server configurations offered by waythrough
+// init. Each call owns its maps and slices, so a caller may customize the
+// result without changing a later call's presets.
+func Presets() []LanguageServer {
+	return []LanguageServer{
 		{
 			Name:    "clojure-lsp",
 			Command: "clojure-lsp",
@@ -72,5 +72,5 @@ func Default() Config {
 				".pyi": "python",
 			},
 		},
-	}}
+	}
 }

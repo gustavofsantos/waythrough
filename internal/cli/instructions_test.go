@@ -49,8 +49,9 @@ type toolSchema struct {
 // language server: listing tools never reaches one, so the manager here is
 // built and left unstarted on purpose.
 func advertisedTools(ctx context.Context) []toolSchema {
-	manager := lsp.NewManager(GinkgoT().TempDir(), config.Default().LanguageServers)
-	server := editor.New(manager, config.Default(), slog.New(slog.DiscardHandler))
+	cfg := config.Config{LanguageServers: config.Presets()}
+	manager := lsp.NewManager(GinkgoT().TempDir(), cfg.LanguageServers)
+	server := editor.New(manager, cfg, slog.New(slog.DiscardHandler))
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	_, err := server.Connect(ctx, serverTransport, nil)

@@ -114,7 +114,7 @@ type waythroughRunner struct {
 }
 
 func newWaythroughRunner(ctx context.Context, fixtureDirectory string) (*waythroughRunner, error) {
-	cfg := config.Default()
+	cfg := config.Config{LanguageServers: config.Presets()}
 	manager := lsp.NewManager(fixtureDirectory, cfg.LanguageServers, lsp.WithDemandStart())
 	if err := manager.Start(ctx); err != nil {
 		return nil, err

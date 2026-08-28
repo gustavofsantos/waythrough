@@ -130,7 +130,7 @@ var _ = Describe("root markers", func() {
 
 		initializeLog := filepath.Join(GinkgoT().TempDir(), "initialize.jsonl")
 		instanceLog := filepath.Join(GinkgoT().TempDir(), "instances.log")
-		entry := config.Default().LanguageServers[1]
+		entry := config.Presets()[1]
 		Expect(entry.Name).To(Equal("gopls"))
 		entry.Command = fakelspPath
 		entry.Args = []string{
