@@ -63,7 +63,8 @@ func runInit(configPath string, input io.Reader, output io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("encode user config: %w", err)
 	}
-	if err := writeFileAtomically(configPath, string(data), initConfigFileMode); err != nil {
+	if err := writeFileAtomicallyIfAbsent(
+		configPath, string(data), initConfigFileMode); err != nil {
 		return fmt.Errorf("write %s: %w", configPath, err)
 	}
 

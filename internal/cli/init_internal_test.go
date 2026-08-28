@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gustavofsantos/waythrough/internal/config"
 )
 
 func TestInitAcceptsSeveralNumberedPresets(t *testing.T) {
@@ -18,6 +21,21 @@ func TestInitAcceptsSeveralNumberedPresets(t *testing.T) {
 	want := []int{1, 4}
 	if !reflect.DeepEqual(selected, want) {
 		t.Fatalf("got selected indexes %v, want %v", selected, want)
+	}
+}
+
+func TestInitPromptListsEveryPreset(t *testing.T) {
+	var output bytes.Buffer
+	if _, err := selectPresetIndexes(
+		strings.NewReader("all\n"), &output, config.Presets()); err != nil {
+		t.Fatalf("select presets: %v", err)
+	}
+
+	for index, preset := range config.Presets() {
+		want := fmt.Sprintf("%d) %s", index+1, preset.Name)
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("prompt %q does not contain %q", output.String(), want)
+		}
 	}
 }
 

@@ -39,7 +39,7 @@ flowchart TB
     mcp --> tools --> routing --> lifecycle
   end
 
-  config["Built-ins or<br/>waythrough.yaml"] --> routing
+  config["User<br/>~/.waythrough.yaml"] --> routing
   config --> lifecycle
 
   subgraph runtime["Project runtime"]
@@ -66,10 +66,10 @@ A typical AI-pairing coding day uses the boundary like this:
 5. **Review and repeat.** The agent brings the results back to the
    developer for the next decision.
 
-Built-in language servers start on demand, so a normal session pays for
-the language tooling it actually uses. An explicit `waythrough.yaml`
-replaces the built-in configuration when a project needs different
-commands, readiness gates, or file mappings.
+Configured language servers start on demand, so a normal session pays for
+the language tooling it actually uses. Waythrough reads one configuration
+file, `~/.waythrough.yaml`, so the same setup follows you across shared
+repositories without adding a repository-owned file.
 
 ## Status
 
@@ -145,9 +145,8 @@ target to list the rest, or see
 
 ## Quick start
 
-1. Install the language server for the code you work on. Waythrough has
-   built-in startup, file-routing, and project-root defaults for these
-   servers:
+1. Install the language server for the code you work on. `waythrough init`
+   offers starter configurations for these common servers:
 
    | Languages | Server command |
    | --- | --- |
@@ -158,10 +157,23 @@ target to list the rest, or see
    | Python | `pyright-langserver --stdio` |
 
    The command must be on the `PATH` the coding agent gives Waythrough.
-   Waythrough copies project-root marker lists from the corresponding
-   declarative Neovim LSP configurations.
+   The starter configurations use project-root marker lists derived from
+   the corresponding declarative Neovim LSP configurations.
 
-2. Add Waythrough as an MCP server in your coding agent's config. Have
+2. Create your user configuration and validate it:
+
+   ```sh
+   waythrough init
+   # Select one or more numbered servers, or enter all.
+   waythrough validate
+   ```
+
+   `init` writes `~/.waythrough.yaml` and never overwrites an existing file.
+   Edit that file to change commands, arguments, environment, readiness,
+   root markers, or file mappings. The selected entries are the complete
+   runtime configuration; Waythrough has no hidden server defaults.
+
+3. Add Waythrough as an MCP server in your coding agent's config. Have
    the agent start it with the project root as its working directory:
 
    ```json
@@ -175,12 +187,13 @@ target to list the rest, or see
    }
    ```
 
-   With no `waythrough.yaml` in that directory, `serve` uses the built-in
-   defaults and starts each server only when a tool first needs its file
-   type. Ask your coding agent to find a definition or list references.
-   Waythrough forwards the request to that file type's server.
+   `serve` reads `~/.waythrough.yaml` and starts each configured server only
+   when a tool first needs its file type. If the file does not exist, `serve`
+   fails and tells you to run `waythrough init`. Ask your coding agent to
+   find a definition or list references. Waythrough forwards the request to
+   that file type's server.
 
-3. Tell your agent to use the tools. An agent that does not know they
+4. Tell your agent to use the tools. An agent that does not know they
    exist keeps searching for text. `waythrough instructions` writes a
    short block into the rules file your agent already reads:
 
@@ -200,11 +213,9 @@ target to list the rest, or see
    and nothing else. Without `--write` the command prints it to stdout
    instead, to read first or to place by hand.
 
-4. Add `waythrough.yaml` only when the project needs a different server,
-   command, arguments, environment, readiness gate, root policy, or file
-   mapping. The repository file replaces the built-in configuration in full
-   on the next `serve` start. For example, a Go project can customize how
-   gopls starts:
+5. Customize `~/.waythrough.yaml` when you need a different server, command,
+   arguments, environment, readiness gate, root policy, or file mapping. For
+   example, you can customize how gopls starts:
 
    ```yaml
    language_servers:
@@ -233,20 +244,16 @@ target to list the rest, or see
    For an equal-priority group, the nearest ancestor containing any marker
    wins. The search starts at the file in the first tool request. If no marker
    matches, Waythrough uses the manager's fallback workspace root. Marker
-   resolution does not read the configuration path. Today `serve` derives the
-   fallback root from that path. This derivation is separate from the marker
+   resolution does not read the configuration path. `serve` uses its current
+   working directory as the fallback root. This is separate from the marker
    search.
 
-   A configured entry with `root_markers` does not start during manager
-   startup. Its first file request selects a root. An explicit restart before
-   that request starts the server at the fallback root. An entry without
-   markers preserves eager startup in a repository configuration.
+   Every configured entry starts on demand. Its first file request selects a
+   root. An explicit restart before that request starts the server at the
+   fallback root.
 
-   `waythrough init` writes a Clojure starter file. Edit it as needed,
-   then run `waythrough validate`. An explicit `--config` path must exist;
-   Waythrough never hides a misspelled path by falling back to defaults.
-   Empty files and unknown configuration fields are rejected. Other
-   languages and language servers require a repository file.
+   `waythrough validate` checks the same `~/.waythrough.yaml` file that
+   `serve` reads. Empty files and unknown configuration fields are rejected.
 
 ## Tools
 
@@ -310,9 +317,6 @@ its place in your agent's tool list:
 }
 ```
 
-If the project has a custom file, add its existing `--config` arguments
-before `--debug`.
-
 Every record goes to stderr, never to stdout, and covers three
 things:
 
@@ -356,9 +360,6 @@ shell:
   }
 }
 ```
-
-Add `--config /absolute/path/to/waythrough.yaml` to the shell command for
-a project that uses a custom file.
 
 Then read it as it fills:
 

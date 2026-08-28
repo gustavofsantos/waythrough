@@ -30,7 +30,7 @@ var _ = Describe("root markers", func() {
 		Expect(os.WriteFile(sourceFile, []byte("main"), 0o644)).To(Succeed())
 
 		initializeLog := filepath.Join(GinkgoT().TempDir(), "initialize.jsonl")
-		configPath := filepath.Join(GinkgoT().TempDir(), "waythrough.yaml")
+		configPath := filepath.Join(GinkgoT().TempDir(), ".waythrough.yaml")
 		configuration := fmt.Sprintf(`language_servers:
   - name: fake
     command: %s
@@ -115,7 +115,7 @@ var _ = Describe("root markers", func() {
 		Expect(manager.Status("fake")).To(Equal(lsp.StatusIdle))
 	})
 
-	It("keeps one built-in root through concurrent start and restart", func(ctx SpecContext) {
+	It("keeps one configured root through concurrent start and restart", func(ctx SpecContext) {
 		workspace := GinkgoT().TempDir()
 		projectOne := filepath.Join(workspace, "one")
 		projectTwo := filepath.Join(workspace, "two")

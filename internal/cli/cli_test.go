@@ -54,8 +54,8 @@ var _ = Describe("waythrough CLI", func() {
 	}
 
 	Describe("init", func() {
-		When("no config file exists at the target path", func() {
-			It("creates a config file with one example language server", func() {
+		When("the user config file does not exist", func() {
+			It("creates it with the selected language-server preset", func() {
 				code := run("init")
 				Expect(code).To(Equal(0))
 
@@ -68,7 +68,7 @@ var _ = Describe("waythrough CLI", func() {
 			})
 		})
 
-		When("a config file already exists at the target path", func() {
+		When("the user config file already exists", func() {
 			BeforeEach(func() {
 				writeConfigFile(configPath, "language_servers: []\n")
 			})
@@ -182,7 +182,7 @@ language_servers:
 	// reads the test binary's own stdin. What that returns depends on how
 	// the suite was started, so there is nothing stable to assert on.
 	Describe("serve", func() {
-		When("the repository file configures no language servers", func() {
+		When("the user file configures no language servers", func() {
 			BeforeEach(func() {
 				writeConfigFile(configPath, "language_servers: []\n")
 			})

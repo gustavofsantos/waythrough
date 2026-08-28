@@ -161,8 +161,8 @@ var _ = Describe("waythrough instructions", func() {
 		Expect(stdout.String()).To(ContainSubstring("grep"))
 	})
 
-	It("takes no config flag, so it works before a project has a config file", func() {
-		Expect(cli.Execute([]string{"instructions", "--config", "/nonexistent.yaml"},
+	It("takes no configuration flag, so it works before setup", func() {
+		Expect(cli.Execute([]string{"instructions", "--unknown"},
 			stdout, stderr)).NotTo(Equal(0))
 		Expect(cli.Execute([]string{"instructions"}, stdout, stderr)).To(Equal(0))
 		Expect(stdout.String()).NotTo(BeEmpty())

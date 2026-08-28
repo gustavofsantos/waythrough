@@ -230,6 +230,30 @@ func writeFileAtomically(path, content string, mode os.FileMode) error {
 	return nil
 }
 
+// writeFileAtomicallyIfAbsent publishes path only when it does not exist.
+// The hard link makes the final publication atomic without replacing a file
+// that another process created after the caller checked for it.
+func writeFileAtomicallyIfAbsent(path, content string, mode os.FileMode) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), ".waythrough-init-*")
+	if err != nil {
+		return fmt.Errorf("create a temporary file next to %s: %w", path, err)
+	}
+	tempPath := temp.Name()
+	defer func() { _ = os.Remove(tempPath) }()
+
+	if err := finishTempFile(temp, content, mode); err != nil {
+		return fmt.Errorf("write %s: %w", tempPath, err)
+	}
+	if err := os.Link(tempPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("config file already exists: %s", path)
+		}
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+
+	return nil
+}
+
 // finishTempFile writes the new contents, gives the file its final
 // permission, and closes it, so the rename that follows publishes a file
 // that is complete on disk rather than one still buffered.

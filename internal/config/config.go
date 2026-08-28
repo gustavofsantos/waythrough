@@ -1,4 +1,4 @@
-// Package config defines the waythrough.yaml schema: the language servers
+// Package config defines the user configuration schema: the language servers
 // Waythrough starts and how to know when each one is ready.
 package config
 
@@ -64,7 +64,7 @@ func (markers *RootMarkers) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// LanguageServer is one entry in waythrough.yaml: how to start a language
+// LanguageServer is one entry in the user configuration: how to start a language
 // server and which files it handles.
 type LanguageServer struct {
 	Name                  string            `yaml:"name"`
@@ -77,12 +77,12 @@ type LanguageServer struct {
 	InitializationOptions map[string]any    `yaml:"initialization_options,omitempty"`
 }
 
-// Config is the parsed content of waythrough.yaml.
+// Config is the parsed content of the user configuration file.
 type Config struct {
 	LanguageServers []LanguageServer `yaml:"language_servers"`
 }
 
-// Load reads and parses the waythrough.yaml file at path.
+// Load reads and parses the configuration file at path.
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

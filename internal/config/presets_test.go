@@ -8,7 +8,7 @@ import (
 )
 
 var _ = Describe("Presets", func() {
-	It("configures the supported common language servers", func() {
+	It("provides the supported common language-server presets", func() {
 		cfg := config.Config{LanguageServers: config.Presets()}
 
 		Expect(config.Validate(cfg)).To(Succeed())
@@ -74,7 +74,7 @@ var _ = Describe("Presets", func() {
 		))
 	})
 
-	It("returns configuration the caller can mutate without changing later defaults", func() {
+	It("returns presets the caller can mutate without changing later presets", func() {
 		first := config.Presets()
 		first[0].Command = "company-clojure-lsp"
 		first[0].Filetypes[".clj"] = "company-clojure"

@@ -19,7 +19,7 @@ var _ = Describe("Load", func() {
 	var path string
 
 	BeforeEach(func() {
-		path = filepath.Join(GinkgoT().TempDir(), "waythrough.yaml")
+		path = filepath.Join(GinkgoT().TempDir(), ".waythrough.yaml")
 	})
 
 	When("the file holds a well-formed language-server entry", func() {
