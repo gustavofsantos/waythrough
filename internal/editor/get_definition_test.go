@@ -87,6 +87,15 @@ func decodeToolOutput[Output any](result *mcp.CallToolResult) Output {
 
 // writeFile creates name under root with content and returns its full path,
 // the fixture every editor spec needs before it can ask about a position.
+// checkoutDirectory returns a new temporary git checkout. Tools resolve a
+// relative path only against a working directory inside a checkout, and
+// every spec here names its file relative to one.
+func checkoutDirectory() string {
+	directory := GinkgoT().TempDir()
+	Expect(os.Mkdir(filepath.Join(directory, ".git"), 0o755)).To(Succeed())
+	return directory
+}
+
 func writeFile(root, name, content string) string {
 	path := filepath.Join(root, name)
 	Expect(os.WriteFile(path, []byte(content), 0o644)).To(Succeed())
@@ -122,7 +131,7 @@ var _ = Describe("get_definition", func() {
 
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
-		root = GinkgoT().TempDir()
+		root = checkoutDirectory()
 	})
 
 	AfterEach(func() { cancel() })
@@ -158,6 +167,27 @@ var _ = Describe("get_definition", func() {
 			result := callTool(ctx, session, "get_definition", "main.fake", 1, 1)
 			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 			Expect(decodeToolOutput[toolOutput](result).Locations).To(BeEmpty())
+		})
+	})
+
+	// A global MCP configuration can start Waythrough in a home directory,
+	// where a relative path names no file the agent meant.
+	When("the path is relative and the working directory is in no git checkout", func() {
+		It("returns a tool error asking for an absolute path, and starts no server", func() {
+			workspace := GinkgoT().TempDir()
+			absolute := writeFile(workspace, "main.fake", "hello")
+
+			cfg := fakeConfig("-definition-line=1", "-definition-column=1")
+			manager := lsp.NewManager(workspace, cfg.LanguageServers, lsp.WithDemandStart())
+			session := connect(ctx, manager, cfg)
+
+			result := callTool(ctx, session, "get_definition", "main.fake", 1, 1)
+			Expect(result.IsError).To(BeTrue())
+			Expect(errorText(result)).To(ContainSubstring("absolute path"))
+			Expect(manager.Status("fake")).To(Equal(lsp.StatusIdle))
+
+			result = callTool(ctx, session, "get_definition", absolute, 1, 1)
+			Expect(result.IsError).To(BeFalse(), func() string { return errorText(result) })
 		})
 	})
 

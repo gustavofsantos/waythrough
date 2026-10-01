@@ -819,7 +819,7 @@ func (m *Manager) Status(name string) (Status, error) {
 // Definition asks the named server for the definition at a 1-based
 // line/column in file, waiting for the server to be ready first and
 // syncing the file's current on-disk content to it before asking. file may
-// be relative to Manager's root or absolute.
+// be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) Definition(
 	ctx context.Context, name, file string, line, column int,
 ) ([]Location, error) {
@@ -840,7 +840,7 @@ func (m *Manager) Definition(
 // References asks the named server for every reference to the symbol at a
 // 1-based line/column in file, waiting for the server to be ready first and
 // syncing the file's current on-disk content to it before asking. file may
-// be relative to Manager's root or absolute.
+// be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) References(
 	ctx context.Context, name, file string, line, column int,
 ) ([]Location, error) {
@@ -867,7 +867,7 @@ func (m *Manager) References(
 // Rename asks the named server for the workspace edit that renames the
 // symbol at a 1-based line/column in file to newName, waiting for the
 // server to be ready first and syncing the file's current on-disk content
-// to it before asking. file may be relative to Manager's root or absolute.
+// to it before asking. file may be absolute, or relative to Manager's root as resolvePath allows.
 // Rename does not write the edit to disk; the caller applies it.
 func (m *Manager) Rename(
 	ctx context.Context, name, file string, line, column int, newName string,
@@ -890,7 +890,7 @@ func (m *Manager) Rename(
 // SignatureHelp asks the named server which signatures the call at a 1-based
 // line/column in file could match, waiting for the server to be ready first
 // and syncing the file's current on-disk content to it before asking. file
-// may be relative to Manager's root or absolute.
+// may be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) SignatureHelp(
 	ctx context.Context, name, file string, line, column int,
 ) (SignatureHelp, error) {
@@ -921,7 +921,10 @@ func (m *Manager) CallHierarchy(
 			"call hierarchy direction must be incoming or outgoing, got %q", direction)
 	}
 
-	path := m.resolvePath(file)
+	path, err := m.resolvePath(ctx, file)
+	if err != nil {
+		return nil, err
+	}
 	proc, err := m.ensureSupervisor(ctx, name, filepath.Dir(path))
 	if err != nil {
 		return nil, err
@@ -1109,7 +1112,7 @@ func requestDirectedCall(
 
 // Diagnostics asks the named server what is wrong in file, waiting for the
 // server to be ready first and syncing the file's current on-disk content to
-// it before asking. file may be relative to Manager's root or absolute. A
+// it before asking. file may be absolute, or relative to Manager's root as resolvePath allows. A
 // diagnostic belongs to the file as a whole, so this takes no position.
 //
 // Only a server that advertised pull diagnostics at its handshake is asked.
@@ -1137,7 +1140,10 @@ func (m *Manager) Diagnostics(ctx context.Context, name, file string) ([]Diagnos
 // file's current on-disk content to it — the setup every LSP position
 // request needs before it can ask the server anything.
 func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProcess, string, error) {
-	path := m.resolvePath(file)
+	path, err := m.resolvePath(ctx, file)
+	if err != nil {
+		return nil, "", err
+	}
 	proc, err := m.ensureSupervisor(ctx, name, filepath.Dir(path))
 	if err != nil {
 		return nil, "", err
@@ -1168,11 +1174,29 @@ func textDocumentPosition(path string, line, column int) protocol.TextDocumentPo
 
 // resolvePath makes file absolute and clean, so that the root it selects
 // and the containment checks in pickInstance both see one spelling of it.
-func (m *Manager) resolvePath(file string) string {
+//
+// A relative file resolves against the Manager's root only when that root
+// is inside a git checkout. An agent started from a global configuration
+// can run Waythrough in a home directory or in /, where a relative path
+// names no file the agent meant, so such a path fails and asks for an
+// absolute one rather than reach whatever file it happens to name. The
+// check climbs from the root once per relative request, one stat a level,
+// so a checkout created after Waythrough started is seen.
+func (m *Manager) resolvePath(ctx context.Context, file string) (string, error) {
 	if filepath.IsAbs(file) {
-		return filepath.Clean(file)
+		return filepath.Clean(file), nil
 	}
-	return filepath.Join(m.root, file)
+	_, inCheckout, err := rootFromMarkers(ctx, m.root, checkoutMarkers)
+	if err != nil {
+		return "", err
+	}
+	if !inCheckout {
+		return "", fmt.Errorf(
+			"relative path %q needs a workspace, but the working directory %s "+
+				"is not inside a git checkout; pass an absolute path",
+			file, m.root)
+	}
+	return filepath.Join(m.root, file), nil
 }
 
 // rootFromMarkers walks from startDirectory to the filesystem root once per

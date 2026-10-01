@@ -48,7 +48,7 @@ var _ = Describe("rename_symbol", func() {
 
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
-		root = GinkgoT().TempDir()
+		root = checkoutDirectory()
 	})
 
 	AfterEach(func() { cancel() })

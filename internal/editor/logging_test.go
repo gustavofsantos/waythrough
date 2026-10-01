@@ -30,7 +30,7 @@ var _ = Describe("what the MCP server records about a tool call", func() {
 
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
-		root = GinkgoT().TempDir()
+		root = checkoutDirectory()
 	})
 
 	AfterEach(func() { cancel() })

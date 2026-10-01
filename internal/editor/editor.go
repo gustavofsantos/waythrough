@@ -104,7 +104,7 @@ func routeByExtension(cfg config.Config) map[string]string {
 }
 
 type position struct {
-	File   string `json:"file" jsonschema:"file path, absolute or relative to the project root"`
+	File   string `json:"file" jsonschema:"absolute file path; relative only inside a git checkout"`
 	Line   int    `json:"line" jsonschema:"1-based line number"`
 	Column int    `json:"column" jsonschema:"1-based column number"`
 }
@@ -143,7 +143,7 @@ type editsOutput struct {
 // document is the input of a tool that asks about a file as a whole, rather
 // than about one position in it.
 type document struct {
-	File string `json:"file" jsonschema:"file path, absolute or relative to the project root"`
+	File string `json:"file" jsonschema:"absolute file path; relative only inside a git checkout"`
 }
 
 // restartTarget names a whole language server, the subject of a tool that

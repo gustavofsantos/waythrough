@@ -266,6 +266,12 @@ target to list the rest, or see
    4. Otherwise, a new process at the marker root, or at the workspace
       root.
 
+   Tools accept absolute file paths anywhere. A relative path resolves
+   against the working directory of `serve`, but only when that directory
+   is inside a git checkout. Some agents start a globally configured MCP
+   server in your home directory, where a relative path names no file you
+   meant, so Waythrough asks for an absolute path instead.
+
    One entry runs at most four processes at once. A request that needs a
    fifth fails with an error that names the roots in use. `restart_server`
    restarts the entry at every root. A restart before any file request
