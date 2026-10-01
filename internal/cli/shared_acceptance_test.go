@@ -45,23 +45,29 @@ func newSharedWorkspace() sharedWorkspace {
 	}
 	workspace.file = filepath.Join(workspace.root, "main.fake")
 	Expect(os.WriteFile(workspace.file, []byte("hello world"), 0o644)).To(Succeed())
-	workspace.writeConfig("")
+	workspace.writeConfig("first")
 	return workspace
 }
 
-// writeConfig writes a configuration whose one server is fakelsp. comment
-// changes the file's bytes, and so its workspace key, without changing
-// what it configures.
-func (w sharedWorkspace) writeConfig(comment string) {
+// writeConfig writes a configuration whose one server is fakelsp, run with
+// any extra flags. comment changes the file's bytes, and so its workspace
+// key, without changing what it configures.
+func (w sharedWorkspace) writeConfig(comment string, extraFlags ...string) {
+	flags := []string{
+		"-instance-log=" + w.instanceLog, "-definition-line=4", "-definition-column=2",
+	}
+	flags = append(flags, extraFlags...)
+	quoted, err := json.Marshal(flags)
+	Expect(err).NotTo(HaveOccurred())
 	content := fmt.Sprintf(`# %s
 language_servers:
   - name: fake
     command: %s
-    args: ["-instance-log=%s", "-definition-line=4", "-definition-column=2"]
+    args: %s
     readiness: handshake
     filetypes:
       .fake: fake
-`, comment, fakelspPath, w.instanceLog)
+`, comment, fakelspPath, quoted)
 	Expect(os.WriteFile(filepath.Join(w.home, ".waythrough.yaml"), []byte(content), 0o600)).
 		To(Succeed())
 }
@@ -136,6 +142,21 @@ func (w sharedWorkspace) sockets() []string {
 	sockets, err := filepath.Glob(filepath.Join(w.runtimeDir, "waythrough", "*.sock"))
 	Expect(err).NotTo(HaveOccurred())
 	return sockets
+}
+
+// daemonPIDs reads the pid each daemon recorded in its lock file.
+func (w sharedWorkspace) daemonPIDs() []int {
+	locks, err := filepath.Glob(filepath.Join(w.runtimeDir, "waythrough", "*.lock"))
+	Expect(err).NotTo(HaveOccurred())
+	var pids []int
+	for _, lock := range locks {
+		data, err := os.ReadFile(lock)
+		Expect(err).NotTo(HaveOccurred())
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		Expect(err).NotTo(HaveOccurred())
+		pids = append(pids, pid)
+	}
+	return pids
 }
 
 func processAlive(pid int) bool {
@@ -215,5 +236,62 @@ var _ = Describe("serve --shared", func() {
 		second := workspace.startSession(0)
 		Expect(second.definitionLine(workspace.file)).To(Equal(5))
 		Expect(workspace.languageServerPIDs()).To(HaveLen(2))
+	})
+
+	It("serves a session that arrives during a slow drain from the next daemon", func() {
+		workspace := newSharedWorkspace()
+		// A server that ignores exit holds the drain for the whole kill
+		// grace, which is the longest a drain takes.
+		workspace.writeConfig("slow drain", "-ignore-exit")
+		first := workspace.startSession(0)
+		Expect(first.definitionLine(workspace.file)).To(Equal(5))
+		draining := workspace.languageServerPIDs()[0]
+
+		Expect(first.session.Close()).To(Succeed())
+		Eventually(workspace.sockets, 5*time.Second).Should(BeEmpty())
+		Expect(processAlive(draining)).To(BeTrue(), "the drain should still be running")
+
+		second := workspace.startSession(0)
+		Expect(second.definitionLine(workspace.file)).To(Equal(5))
+		Expect(processAlive(draining)).To(BeFalse(),
+			"the next daemon may start its server only after its predecessor drained")
+		Expect(workspace.languageServerPIDs()).To(HaveLen(2))
+	})
+
+	It("recovers from a daemon that was killed and left its socket behind", func() {
+		workspace := newSharedWorkspace()
+		first := workspace.startSession(time.Hour)
+		Expect(first.definitionLine(workspace.file)).To(Equal(5))
+		daemons := workspace.daemonPIDs()
+		Expect(daemons).To(HaveLen(1))
+
+		Expect(syscall.Kill(daemons[0], syscall.SIGKILL)).To(Succeed())
+		Eventually(func() bool { return processAlive(daemons[0]) }, 5*time.Second).
+			Should(BeFalse())
+		Expect(workspace.sockets()).To(HaveLen(1), "SIGKILL leaves the socket file")
+
+		second := workspace.startSession(0)
+		Expect(second.definitionLine(workspace.file)).To(Equal(5))
+		Expect(workspace.daemonPIDs()).NotTo(ContainElement(daemons[0]))
+	})
+
+	It("gives an edited configuration its own daemon, and retires the old one", func() {
+		workspace := newSharedWorkspace()
+		before := workspace.startSession(0)
+		Expect(before.definitionLine(workspace.file)).To(Equal(5))
+		oldServer := workspace.languageServerPIDs()[0]
+
+		workspace.writeConfig("edited")
+		after := workspace.startSession(0)
+		Expect(after.definitionLine(workspace.file)).To(Equal(5))
+		pids := workspace.languageServerPIDs()
+		Expect(pids).To(HaveLen(2), "no session may attach to servers from a stale configuration")
+		Expect(workspace.sockets()).To(HaveLen(2))
+
+		Expect(before.session.Close()).To(Succeed())
+		Eventually(func() bool { return processAlive(oldServer) }, 15*time.Second).
+			Should(BeFalse())
+		Expect(processAlive(pids[1])).To(BeTrue())
+		Expect(after.definitionLine(workspace.file)).To(Equal(5))
 	})
 })

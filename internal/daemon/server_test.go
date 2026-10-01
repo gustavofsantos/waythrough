@@ -85,6 +85,14 @@ type bufferedReader struct {
 
 func (bufferedReader) Close() error { return nil }
 
+func listen(socket string) net.Listener {
+	var config net.ListenConfig
+	listener, err := config.Listen(context.Background(), "unix", socket)
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(listener.Close)
+	return listener
+}
+
 func dial(socket string) (net.Conn, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(context.Background(), "unix", socket)
@@ -221,9 +229,7 @@ var _ = Describe("ReadGreeting", func() {
 	// it says daemonSays, then closes its end, which a draining daemon does
 	// without saying anything at all.
 	exchange := func(daemonSays string) error {
-		listener, err := net.Listen("unix", shortSocketPath())
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(listener.Close)
+		listener := listen(shortSocketPath())
 		go func() {
 			conn, err := listener.Accept()
 			if err != nil {
