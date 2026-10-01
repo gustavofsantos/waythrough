@@ -93,9 +93,11 @@ SHA-256 hash, in hex, over these inputs, each with a length prefix:
 1. **Binary identity.** This is the version string, plus the size and
    modification time of the executable. Every `go install` build
    reports `dev`, so the version alone cannot tell two of them apart.
-2. **Workspace root.** This is `filepath.EvalSymlinks(os.Getwd())`.
-   Every session on a daemon has the same root, so relative tool paths
-   resolve as they do today.
+2. **Workspace root.** This is `os.Getwd()`, as `serve` uses it today,
+   with no symlink resolution. Every session on a daemon has the same
+   root, so relative tool paths and result paths stay exactly as they
+   are today. A workspace reached through two symlink spellings gets two
+   daemons. That is rare, and it never changes an answer.
 3. **The bytes of the configuration file.** If the user edits
    `~/.waythrough.yaml`, the next session gets a new daemon. The old
    daemon stops when its last session ends. No session ever attaches to
@@ -127,7 +129,7 @@ answer.
   | `<key>.sock` | Listening socket, mode `0600`. | Removed when the daemon drains. If the daemon crashes, the next daemon replaces it. |
   | `<key>.lock` | The daemon holds an exclusive `flock` on it for its whole life. This proves that a daemon is alive. | Never removed. Removing a file that holds a `flock` lets two processes lock two different inodes. |
   | `<key>.spawn` | A client holds an exclusive `flock` on it while it attaches or starts a daemon. Only one client at a time starts a daemon. | Never removed. |
-  | `<key>.log` | The daemon's stderr. It is truncated at each daemon start and capped at 16 MiB. | Replaced by the next daemon. |
+  | `<key>.log` | The daemon's stderr, capped at 16 MiB. The client opens it with `O_APPEND` and never truncates it. A daemon truncates it only after it holds `<key>.lock`. Otherwise a predecessor that is still draining would overwrite the new log at its old offset. | Truncated by the next daemon. |
 - The full socket path must fit in `sun_path`: 108 bytes on Linux and
   104 on macOS. The path is `dir + 38` bytes. The client checks the
   length and fails with a clear error when the path is too long.
@@ -169,10 +171,30 @@ sequenceDiagram
   The greeting line has a 64-byte limit and a 5 s read deadline. It
   holds a protocol version and the key, and the client checks both.
 - All attach steps share one deadline: **30 s**. This covers the wait for
-  the spawn lock, a predecessor's drain, and the daemon's start. If the
-  deadline expires, `serve` fails and names `<key>.log`. It does not
-  fall back to a private manager. A silent fallback would hide a fault
-  and bring back the duplicate servers this design removes.
+  the spawn lock, a predecessor's drain, and the daemon's start. The
+  client passes this absolute deadline to the daemon it starts, as
+  `--attach-deadline`. The daemon uses it to bound its wait for the lock
+  (see Daemon lifecycle), so the two sides never disagree about how
+  long a drain may take. If the deadline expires, `serve` fails and
+  names `<key>.log`. It does not fall back to a private manager. A
+  silent fallback would hide a fault and bring back the duplicate
+  servers this design removes.
+- Each outcome of an attach has one defined response. Every retry
+  happens inside the 30 s deadline.
+
+  | Outcome | Client response |
+  | --- | --- |
+  | Greeting received | Start proxying. |
+  | Dial fails, or EOF or a reset before the greeting (no daemon, or one draining) | Take the spawn lock, then dial again. Start a daemon if the dial still fails. |
+  | `busy` line (session limit reached) | Fail at once with that message. Do not retry. |
+  | Greeting read times out (daemon alive but hung) | Fail with an error that names the daemon's pid, read from `<key>.lock`, and `<key>.log`. |
+  | The started daemon exits with the "key changed" exit code | Reload the configuration, compute the key again, and retry once. |
+  | The started daemon exits with any other code | Fail and name `<key>.log`. |
+- Both sides check the peer's credentials on the accepted socket:
+  `SO_PEERCRED` on Linux and `getpeereid` on macOS. Each side refuses a
+  peer whose uid is not its own. The directory check guards the path,
+  and this check guards the connection, so a race on the directory
+  (TOCTOU) cannot let another user in.
 - The client calls `Wait` on the daemon it started from a goroutine.
   This collects the process if the daemon exits before the client does,
   and an early exit ends the polling at once. A detached daemon that
@@ -189,25 +211,40 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
   [*] --> Locking
-  Locking --> Exit: lock not acquired in 15 s
-  Locking --> Listening: flock acquired, stale socket removed, config re-read and key re-checked
-  Listening --> Serving: session accepted (count 0→1, linger timer stopped)
-  Listening --> Draining: startup linger expired with no session
+  Locking --> Exit: lock not acquired before the attach deadline
+  Locking --> Listening: flock acquired, log truncated, stale socket removed, config re-read and key re-checked
+  Listening --> Serving: session accepted (count 0→1, timer stopped)
+  Listening --> Draining: startup grace expired with no session
   Serving --> Serving: sessions come and go (count ≥ 1)
   Serving --> Lingering: last session ended (count 1→0, timer armed)
   Lingering --> Serving: session accepted before the timer fires
   Lingering --> Draining: timer fired and count is still 0
   Serving --> Draining: SIGTERM or SIGINT
-  Draining --> Exit: listener closed (socket removed), manager.Shutdown(10 s), lock released on exit
+  Draining --> Exit: listener closed (socket removed), manager.Shutdown (up to about 16 s), lock released on exit
   Exit --> [*]
 ```
 
-1. **Lock.** The daemon polls `flock(<key>.lock, LOCK_EX|LOCK_NB)` for up
-   to 15 s. The poll waits out a predecessor that is still draining:
-   `Manager.Shutdown` takes up to 5 s per server, and it stops all
-   servers in parallel. While the daemon holds the lock, no other
-   daemon for the key is alive, so it can safely remove a stale
-   `<key>.sock`.
+1. **Lock.** The daemon polls `flock(<key>.lock, LOCK_EX|LOCK_NB)` until
+   the client's `--attach-deadline`. The poll waits out a predecessor
+   that is still draining.
+
+   A drain is bounded as follows. `Manager.Shutdown` stops all servers in
+   parallel. For each one, `stopAttempt` first sends `shutdown` under the
+   10 s context. It then waits up to the 5 s kill grace, and then waits
+   for the supervisor to return. The total is about 15 s plus the reap
+   time, which is less than the 30 s attach deadline.
+
+   While the daemon holds the lock, no other daemon for the key is
+   alive. It can therefore safely remove a stale `<key>.sock`, and it
+   then writes its pid into the lock file for diagnostics.
+
+   The daemon keeps the lock's `*os.File` referenced for its whole life,
+   as a field of the daemon value, and never closes it. If that file
+   were unreachable, the garbage collector's finalizer would close the
+   descriptor and release the lock while the daemon is still serving.
+   Go opens the file with `O_CLOEXEC`, and the daemon never passes it in
+   `ExtraFiles`. A language server therefore never inherits the lock,
+   and a server left orphaned cannot keep a key locked.
 2. **Check the key again.** The daemon reads the configuration itself
    and computes the key from what it read. If that key differs from the
    `--key` argument, it exits. The file changed between the client's
@@ -216,19 +253,38 @@ stateDiagram-v2
 3. **Serve.** The daemon calls `lsp.NewManager(root, ..., WithDemandStart())`
    and `editor.New` once. For each accepted connection, it does these
    steps:
-   1. It takes the registry lock.
-   2. It refuses the connection if the daemon is draining or already has
-      `maxSessions` (64) sessions.
-   3. Otherwise, it increments `count` and stops the linger timer.
-   4. It releases the lock and writes the greeting.
-   5. It runs `server.Connect(lifetimeCtx, &mcp.IOTransport{conn, conn})`
+   1. It checks the peer's uid.
+   2. It takes the registry lock.
+   3. If the daemon is draining, it closes the connection. If the daemon
+      already has `maxSessions` (64) sessions, it writes `busy` and
+      closes the connection.
+   4. Otherwise, it increments `count` and stops the timer.
+   5. It releases the lock. It immediately registers the matching
+      decrement with `defer`, before it takes any step that can fail.
+      The steps that can fail are the greeting write, `Connect`, and
+      `Wait`. If the decrement waited until after `Wait`, a failed
+      greeting write would leak one count, and the daemon would never
+      drain.
+   6. It writes the greeting.
+   7. It runs `server.Connect(lifetimeCtx, &mcp.IOTransport{conn, conn})`
       and then `Wait()`.
-   6. When the session ends, it decrements `count` under the lock and
-      arms the timer when `count` reaches 0.
-4. **Linger.** The timer carries a generation number that every arm and
+   8. The deferred decrement runs under the registry lock and arms the
+      linger timer when `count` reaches 0.
+
+   A panic in a tool handler would end the daemon process, and with it
+   every session in the workspace. A receiving middleware therefore
+   recovers panics for each request. It turns a panic into an error for
+   that one tool call, and logs it.
+4. **Timers.** The timer carries a generation number that every arm and
    every stop increments. A timer that fires with an old generation does
-   nothing. The daemon arms the timer once at startup too. A daemon whose
-   client died before it attached therefore stops by itself.
+   nothing. Two durations use it:
+   - The **startup grace** is armed once, when the daemon starts
+     listening. It lasts until the client's attach deadline. The spawning
+     client therefore always has time to attach, even with `--linger=0`.
+     A daemon whose spawning client died stops by itself when the grace
+     ends.
+   - The **linger** is armed each time `count` falls to 0. It lasts the
+     configured linger duration.
 5. **Drain.** All of these happen in one hold of the registry lock: the
    daemon sets `draining`, then closes the listener, which removes the
    socket file. After that, it calls `manager.Shutdown` with a bounded
@@ -245,9 +301,11 @@ one agent from stopping servers that other agents use.
 | At most one daemon is alive for each key. | The exclusive `flock` on `<key>.lock`, held for the daemon's whole life and released by the kernel on any exit. |
 | At most one client starts a daemon for a key at a time. | The `flock` on `<key>.spawn`, plus a second dial after the lock is acquired. |
 | A greeting means a live, registered session. | The daemon writes the greeting only after it increments `count`, under the same lock that `draining` uses. |
-| `count` equals the number of live sessions. | Each session goroutine decrements exactly once, in a `defer` after `Wait`. A crashed client closes its socket, and that ends `Wait`. |
+| `count` equals the number of live sessions. | Each increment is paired with a `defer`red decrement before any fallible step, so it runs exactly once on every path. A crashed client closes its socket, and that ends `Wait`. |
 | Servers stop only when no session is connected. | Drain requires `count == 0` and a current timer generation, both checked under the registry lock. |
-| Only the same user can connect. | The checks on the runtime directory's owner, mode, and symlink status, plus socket mode `0600`. |
+| The lock is held for the daemon's whole life. | The lock file stays referenced by the daemon value and is never closed. It is opened `O_CLOEXEC` and never passed to a child. |
+| Only the same user can connect. | Peer uid check on both ends of each connection, plus the runtime directory checks (owner, mode, not a symlink) and socket mode `0600`. |
+| The spawning client always has time to attach. | The startup grace lasts until the attach deadline, whatever the linger is. |
 | A daemon never runs with a configuration other than the one its key names. | The daemon computes the key again. |
 
 ### Bounds
@@ -256,10 +314,12 @@ one agent from stopping servers that other agents use.
 | --- | --- |
 | Sessions per daemon | 64. Beyond that, the daemon refuses with an explicit error line. |
 | Attach time | 30 s, one deadline for every attach step |
-| Daemon lock wait | 15 s |
+| Daemon lock wait | Until the client's attach deadline |
 | Greeting | 64 bytes, 5 s read deadline |
-| Drain | `manager.Shutdown`, 10 s context, 5 s kill grace per server |
+| Drain | About 16 s. The 10 s `shutdown` context and the 5 s kill grace run in parallel across servers, plus the reap. |
+| Startup grace | Until the attach deadline |
 | Linger | Default 60 s, configurable (see Q2) |
+| P1 sync lock wait | Bounded by the tool call's context |
 | Daemon log | 16 MiB per daemon life. Truncated at start, with a marker line when the cap is reached. |
 | Daemons | One per distinct key. Each one stops itself when it has no sessions. |
 
@@ -284,15 +344,33 @@ sub-millisecond and replaces a cold index.
 - **Environment.** Servers inherit the environment of the session that
   started the daemon. Today, they inherit their own session's
   environment.
+- **A crashed daemon can leave orphaned servers.** If the daemon gets
+  SIGKILL, its language servers lose their parent. Most of them exit
+  when their stdin closes, as the LSP base protocol expects, and `gopls`
+  does. One that does not exit keeps running while the next daemon
+  starts a second copy. Today, a `serve` that gets SIGKILL has exactly
+  the same gap, so sharing makes it no worse. See Q5.
 
 ### Prerequisite fixes
 
-- **P1. Serialize file synchronization per server.** Hold a sync mutex on
-  `serverProcess` across the steps that read the file, compute the
-  notification, send it, and store the new state. The cost is bounded:
-  files are at most 16 MiB, and the hold is one notification write.
-  This fixes the existing race described above. With shared sessions,
-  concurrent calls on one file become routine.
+- **P1. Serialize file synchronization per server.** This fixes the
+  existing race described above. With shared sessions, concurrent calls
+  on one file become routine. The race also corrupts `openFiles`: it can
+  record text other than what the server last received. Later syncs then
+  compare against that wrong text, skip the `didChange`, and leave the
+  server stale.
+  - Hold a sync lock on `serverProcess` across the file read, the
+    notification, and the state store. The file read must stay inside
+    the lock, so that the newest text always wins.
+  - The lock must honor context. A jsonrpc2 notification write ignores
+    its context. A hung server would therefore hold a plain
+    `sync.Mutex` forever, and callers from every session would queue
+    behind it with no way to cancel. Use a one-slot channel, and acquire
+    it with a `select` on the call's context.
+  - Restart and shutdown never take this lock, because a restart is how
+    a hung server is recovered. `beginAttempt` already resets
+    `openFiles`, and the attempt checks in `syncFileOnAttempt` discard a
+    sync that finishes after a restart.
 - **P2. Apply or reject `env`.** Waythrough accepts the `env` field but
   ignores it. Once daemons outlive the session that started them, a
   per-server `env` is how a user pins the environment a server runs
@@ -312,7 +390,8 @@ Integration tests build the binary and use `fakelsp` with a new
    and one server process.
 3. The last session disconnects. After the linger time, the daemon
    exits, the server process is gone, and the socket file is removed.
-   With linger 0, this happens at once.
+   With linger 0, this happens at once, and a new session still attaches
+   to a daemon it has just started.
 4. A client gets SIGKILL. The count drops, and the daemon drains as in
    test 3.
 5. A client arrives during a drain. It retries after the missing
@@ -327,17 +406,31 @@ Integration tests build the binary and use `fakelsp` with a new
 9. A socket path that is too long fails with an explicit error.
 10. For P1: concurrent synchronizations of one file from two sessions
     send exactly one `didOpen`, strictly increasing versions, and end
-    with the newest text.
+    with the newest text. A sync that waits behind a hung server returns
+    when its context is cancelled. A restart still succeeds while that
+    sync is blocked.
+11. A slow drain: `fakelsp -ignore-exit` makes a drain take the full
+    kill grace. A session that arrives during that drain attaches to the
+    successor daemon within the attach deadline.
+12. A greeting write fails because the client closes at once. `count`
+    returns to 0, and the daemon drains.
+13. A panicking tool handler fails only that call. Other sessions keep
+    working.
+14. A peer with a different uid is refused. Where tests can run as a
+    second uid, test this directly. Otherwise, test the check function
+    in isolation.
 
 ## Delivery slices
 
 1. **P1, the synchronization fix.** It has value alone, and sharing
    depends on it.
 2. **Shared mode, happy path.** Covers the key, the runtime directory,
-   the locks, the start, the greeting, the proxy, the count, and linger
-   teardown. Tests 1–4 and 8–9.
-3. **Recovery.** Covers the drain race, stale sockets, configuration
-   changes, the session limit, and the log cap. Tests 5–7.
+   peer credentials, the locks, the start, the greeting, the proxy, the
+   count, the startup grace, linger teardown, and panic recovery.
+   Tests 1–4, 8–9, and 12–14.
+3. **Recovery.** Covers the drain race, slow drains, stale sockets,
+   configuration changes, the session limit, the client's outcome
+   table, and the log cap. Tests 5–7 and 11.
 4. **Documentation.** README, ARCHITECTURE (a new lifecycle diagram),
    and the `restart_server` description.
 5. **Optional.** `waythrough status`, which lists live daemons by
@@ -372,3 +465,15 @@ Integration tests build the binary and use `fakelsp` with a new
     source text, through rename results, to disk in every run. The
     directory is `0700`, but the README promises that this happens only
     with `--debug`.
+- **Q5. Orphaned servers after a daemon crash.**
+  - *Recommendation:* accept the gap that exists today, document it, and
+    rely on servers exiting when stdin closes.
+  - *Stronger option:*
+    1. Start each server in its own process group.
+    2. Record the group IDs in `<key>.pids`.
+    3. A successor daemon that holds the lock kills the recorded groups
+       before it starts new servers.
+
+    This closes the gap, but it must guard against PID reuse. It must
+    check each process's start time before it sends the kill. That
+    check is platform-specific code.
