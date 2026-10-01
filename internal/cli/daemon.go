@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -55,6 +56,9 @@ func newDaemonCommand() *cobra.Command {
 		options.attachDeadline = deadline
 		if options.key == "" || options.root == "" {
 			return errors.New("daemon needs --key and --root")
+		}
+		if !filepath.IsAbs(options.root) {
+			return fmt.Errorf("--root must be an absolute path, got %q", options.root)
 		}
 		return runDaemon(cmd.ErrOrStderr(), options)
 	}

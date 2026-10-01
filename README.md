@@ -242,15 +242,40 @@ target to list the rest, or see
    ```
 
    For an equal-priority group, the nearest ancestor containing any marker
-   wins. The search starts at the file in the first tool request. If no marker
-   matches, Waythrough uses the manager's fallback workspace root. Marker
-   resolution does not read the configuration path. `serve` uses its current
-   working directory as the fallback root. This is separate from the marker
-   search.
+   wins. The search starts at the file in each tool request. Marker
+   resolution does not read the configuration path.
 
-   Every configured entry starts on demand. Its first file request selects a
-   root. An explicit restart before that request starts the server at the
-   fallback root.
+   If no marker matches, Waythrough uses the workspace root: the current
+   working directory of `serve`. A file inside the workspace uses that root.
+   A file outside the workspace fails with an error, so that a server never
+   answers for code it did not index.
+
+   Every configured entry starts on demand, and one entry can run several
+   processes, one for each project root. This lets one session work across
+   several git worktrees, even with the MCP server in your global agent
+   configuration. Waythrough picks the process for each file in this order:
+
+   1. The process that already runs at the file's marker root.
+   2. A process whose root contains the file, in the same git checkout. A
+      nested module uses its repository's process. A worktree nested inside
+      a repository has its own `.git`, so it does not.
+   3. For a file in no git checkout, the process that the last request
+      used. A module cache or a toolchain's sources is not a project of its
+      own. The agent usually reaches it from a definition in its project,
+      and that project's process knows how the project uses the code.
+   4. Otherwise, a new process at the marker root, or at the workspace
+      root.
+
+   Tools accept absolute file paths anywhere. A relative path resolves
+   against the working directory of `serve`, but only when that directory
+   is inside a git checkout. Some agents start a globally configured MCP
+   server in your home directory, where a relative path names no file you
+   meant, so Waythrough asks for an absolute path instead.
+
+   One entry runs at most four processes at once. A request that needs a
+   fifth fails with an error that names the roots in use. `restart_server`
+   restarts the entry at every root. A restart before any file request
+   starts the server for the workspace root.
 
    `waythrough validate` checks the same `~/.waythrough.yaml` file that
    `serve` reads. Empty files and unknown configuration fields are rejected.

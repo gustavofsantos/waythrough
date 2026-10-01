@@ -72,7 +72,8 @@ func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Serv
 		Name: "restart_server",
 		Description: "Restart one language server by name, and wait until its " +
 			"replacement can answer. Use it when a server's answers no longer " +
-			"match the code on disk. Every other language server keeps running. " +
+			"match the code on disk. The server restarts for every project root " +
+			"it serves. Every other language server keeps running. " +
 			"Every session sharing this server sees the restart too.",
 	}, e.restartServer)
 
@@ -103,7 +104,7 @@ func routeByExtension(cfg config.Config) map[string]string {
 }
 
 type position struct {
-	File   string `json:"file" jsonschema:"file path, absolute or relative to the project root"`
+	File   string `json:"file" jsonschema:"absolute file path; relative only inside a git checkout"`
 	Line   int    `json:"line" jsonschema:"1-based line number"`
 	Column int    `json:"column" jsonschema:"1-based column number"`
 }
@@ -142,7 +143,7 @@ type editsOutput struct {
 // document is the input of a tool that asks about a file as a whole, rather
 // than about one position in it.
 type document struct {
-	File string `json:"file" jsonschema:"file path, absolute or relative to the project root"`
+	File string `json:"file" jsonschema:"absolute file path; relative only inside a git checkout"`
 }
 
 // restartTarget names a whole language server, the subject of a tool that

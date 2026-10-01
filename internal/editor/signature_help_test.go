@@ -30,7 +30,7 @@ var _ = Describe("signature_help", func() {
 
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
-		root = GinkgoT().TempDir()
+		root = checkoutDirectory()
 	})
 
 	AfterEach(func() { cancel() })

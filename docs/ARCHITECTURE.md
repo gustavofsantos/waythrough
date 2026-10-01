@@ -29,9 +29,12 @@ tools and check a change.
    `internal/config`. If the file is missing, the command fails and points
    to `waythrough init`. The user file is the complete runtime configuration.
 3. `internal/cli` starts an `internal/lsp` manager. Every configured server
-   starts on the first request routed to it. Concurrent first requests share
-   one supervisor. An explicit restart before the first file request starts
-   it at the fallback root. Each server gates requests until ready.
+   starts on the first request routed to it, once for each project root that
+   its root markers find. A file that no marker claims uses the workspace
+   root, which is the working directory. A file outside the workspace that
+   no marker claims fails. Concurrent first requests for one root share one
+   supervisor. An explicit restart before the first file request starts the
+   server at the workspace root. Each server gates requests until ready.
 4. `internal/cli` builds the MCP server from `internal/editor`. This
    step registers the `get_definition`, `list_references`,
    `rename_symbol`, `signature_help`, `get_call_hierarchy`,
@@ -111,10 +114,15 @@ anything.
 
 ## Server lifecycle
 
-Once a language server starts, one goroutine owns it through shutdown.
-Configured servers have no goroutine until their first file request. The
-manager's single-flight gate lets exactly one such request create the owner.
-The owner keeps its selected root across process restarts.
+A configured server runs one instance for each project root that a request
+needs, up to four. Each instance has a fixed root. Two worktrees are two
+roots, so they never share an index. `pickInstance` in `internal/lsp`
+documents the order in which a file finds its instance: a nested module
+shares its repository's instance, and a file in no git checkout, such as
+a module cache, uses the instance that the last request used. Once an instance starts, one goroutine
+owns it through shutdown. An instance has no goroutine until its first file
+request. The manager's single-flight gate lets exactly one such request
+create the owner.
 
 The owner goroutine starts the process, runs the handshake, and waits for the
 process to exit. Then it starts another process, unless the server has exited

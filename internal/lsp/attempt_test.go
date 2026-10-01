@@ -26,6 +26,7 @@ import (
 func newAttemptTracker(readiness config.Readiness) *serverProcess {
 	return newServerProcess(
 		config.LanguageServer{Name: "fake", Readiness: readiness},
+		string(filepath.Separator), "",
 		slog.New(slog.DiscardHandler))
 }
 

@@ -40,6 +40,12 @@ const (
 	maxCallHierarchyRoots       = 16
 	maxCallHierarchyCalls       = 4096
 	maxCallHierarchySites       = 16384
+	// maxWorkspaceRootsPerServer bounds how many processes one configured
+	// server may run at once, one per workspace root. Each process indexes
+	// its whole root, and a language server such as gopls can hold gigabytes
+	// for one large repository, so a session that wanders across many
+	// worktrees must hit an explicit error rather than exhaust memory.
+	maxWorkspaceRootsPerServer = 4
 )
 
 const maxConcurrentCallHierarchyRequests = 4
@@ -76,7 +82,26 @@ type Manager struct {
 
 	mu          sync.Mutex
 	lifetimeCtx context.Context
-	procs       map[string]*serverProcess
+	// shuttingDown is set once by Shutdown. After it, no new instance is
+	// created, so no process can start that Shutdown did not see.
+	shuttingDown bool
+	servers      map[string]*configuredServer
+}
+
+// configuredServer is one configured language-server entry and the
+// processes it runs, one per workspace root a request has needed. Files
+// from two worktrees reach two processes, each indexing its own tree, rather
+// than one process that silently answers for a tree it never loaded. See
+// pickInstance for how a file finds its process.
+//
+// instances is guarded by Manager.mu. An instance, once created, stays until
+// Shutdown: its process may crash and restart, but its root never changes.
+type configuredServer struct {
+	entry     config.LanguageServer
+	instances map[string]*serverProcess
+	// lastUsed is the instance the latest request reached. A file outside
+	// every checkout goes to it: see pickInstance.
+	lastUsed *serverProcess
 }
 
 // Location is a position in a file, 1-based to match how a coding agent
@@ -238,16 +263,23 @@ func WithDemandStart() Option {
 	return func(m *Manager) { m.demandStart = true }
 }
 
-// NewManager builds a Manager for entries. root is the project directory
-// passed to each language server as its workspace root.
+// NewManager builds a Manager for entries. root is the workspace directory:
+// relative file paths resolve against it, and a file inside it that no root
+// marker claims is served by a process rooted there. A file outside it that
+// no root marker claims is refused.
 //
 // Precondition: config.Validate returned no error for the config entries
-// came from. procs is keyed by entry name, so two entries sharing a name
-// would collapse into one process here, in silence, and the second would
-// never start. config.Validate is the one enforcer of that uniqueness.
+// came from. servers is keyed by entry name, so two entries sharing a name
+// would collapse into one here, in silence, and the second would never
+// start. config.Validate is the one enforcer of that uniqueness.
 func NewManager(root string, entries []config.LanguageServer, opts ...Option) *Manager {
+	if !filepath.IsAbs(root) {
+		panic(fmt.Sprintf("lsp: NewManager needs an absolute workspace root, got %q", root))
+	}
 	m := &Manager{
-		root:                 root,
+		// A clean root is one spelling of it, so a marker root found by
+		// climbing to the same directory keys the same instance.
+		root:                 filepath.Clean(root),
 		logger:               slog.New(slog.DiscardHandler),
 		progressDebounce:     defaultProgressDebounce,
 		restartLimit:         defaultRestartLimit,
@@ -255,30 +287,40 @@ func NewManager(root string, entries []config.LanguageServer, opts ...Option) *M
 		shutdownGrace:        defaultShutdownGrace,
 		readinessTimeout:     defaultReadinessTimeout,
 		callHierarchyTimeout: defaultCallHierarchyTimeout,
-		procs:                make(map[string]*serverProcess, len(entries)),
+		servers:              make(map[string]*configuredServer, len(entries)),
 	}
 	for _, opt := range opts {
 		opt(m)
 	}
 	for _, entry := range entries {
-		m.procs[entry.Name] = newServerProcess(entry, m.logger)
+		m.servers[entry.Name] = &configuredServer{
+			entry:     entry,
+			instances: make(map[string]*serverProcess, 1),
+		}
 	}
 	return m
 }
 
 // newServerProcess builds the tracking state for one configured language
-// server, before any attempt to spawn it.
+// server at one workspace root, before any attempt to spawn it.
 //
 // It exists so that no caller has to remember the logger: a serverProcess
 // records its own lifecycle, so one built without a logger would nil-panic
 // on the first transition it made rather than at the point of the mistake.
-func newServerProcess(entry config.LanguageServer, logger *slog.Logger) *serverProcess {
+func newServerProcess(
+	entry config.LanguageServer, workspaceRoot, checkout string, logger *slog.Logger,
+) *serverProcess {
 	if logger == nil {
 		panic("lsp: newServerProcess needs a logger, got nil")
+	}
+	if !filepath.IsAbs(workspaceRoot) {
+		panic(fmt.Sprintf("lsp: workspace root must be absolute, got %q", workspaceRoot))
 	}
 
 	return &serverProcess{
 		entry:      entry,
+		root:       workspaceRoot,
+		checkout:   checkout,
 		logger:     logger,
 		readyCh:    make(chan struct{}),
 		retiredCh:  make(chan struct{}),
@@ -308,56 +350,218 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.mu.Unlock()
 		return nil
 	}
-	procs := make([]*serverProcess, 0, len(m.procs))
-	for _, proc := range m.procs {
-		if len(proc.entry.RootMarkers) > 0 {
+	names := make([]string, 0, len(m.servers))
+	for name, server := range m.servers {
+		if len(server.entry.RootMarkers) > 0 {
 			continue
 		}
-		procs = append(procs, proc)
+		names = append(names, name)
 	}
 	m.mu.Unlock()
 
-	for _, proc := range procs {
-		m.startSupervisor(lifetimeCtx, proc, m.root)
+	for _, name := range names {
+		proc, err := m.instanceFor(ctx, name, m.root)
+		if err != nil {
+			return err
+		}
+		m.startSupervisor(lifetimeCtx, proc)
 	}
 	return nil
 }
 
-// startSupervisor is the single spawn gate for one configured server. The
+// startSupervisor is the single spawn gate for one server instance. The
 // process-level reservation makes concurrent first requests single-flight.
-func (m *Manager) startSupervisor(
-	ctx context.Context, proc *serverProcess, workspaceRoot string,
-) bool {
-	if ctx == nil || !proc.beginSupervision(workspaceRoot) {
+func (m *Manager) startSupervisor(ctx context.Context, proc *serverProcess) bool {
+	if ctx == nil || !proc.beginSupervision() {
 		return false
 	}
 	go m.runServer(ctx, proc)
 	return true
 }
 
-// ensureSupervisor starts proc on the Manager lifetime captured by Start.
-// Eager managers reach this with an existing supervisor, so the same call is
-// safe on every request without branching on startup mode.
+// ensureSupervisor finds the instance of name that serves directory,
+// creating it when no request has needed it yet, and starts it on the
+// Manager lifetime captured by Start. Eager managers reach this with an
+// existing supervisor, so the same call is safe on every request without
+// branching on startup mode.
 func (m *Manager) ensureSupervisor(
-	ctx context.Context, proc *serverProcess, requestedFile string,
-) (bool, error) {
+	ctx context.Context, name, directory string,
+) (*serverProcess, error) {
+	proc, err := m.instanceFor(ctx, name, directory)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("start language server after root discovery: %w", err)
+	}
 	m.mu.Lock()
 	lifetimeCtx := m.lifetimeCtx
 	m.mu.Unlock()
+	m.startSupervisor(lifetimeCtx, proc)
+	return proc, nil
+}
 
-	workspaceRoot, err := proc.selectWorkspaceRoot(ctx, func(ctx context.Context) (string, error) {
-		if requestedFile != "" && len(proc.entry.RootMarkers) > 0 {
-			return rootFromMarkers(ctx, requestedFile, proc.entry.RootMarkers, m.root)
-		}
-		return m.root, nil
-	})
+// instanceRoute is what the filesystem says about one directory, gathered
+// before Manager.mu is taken so that no lock is held across a stat.
+type instanceRoute struct {
+	directory string
+	// markerRoot is the nearest root the entry's root markers find, and is
+	// empty when none matches.
+	markerRoot string
+	// checkout is the nearest ancestor holding a .git file or directory, and
+	// is empty when the directory belongs to no checkout.
+	checkout string
+}
+
+// instanceFor returns the instance of name that serves directory, and
+// creates its tracking state when none does. Creation spawns nothing;
+// startSupervisor does that. The count of instances per server is bounded,
+// and none is created once Shutdown has begun, so Shutdown always sees every
+// process it must stop.
+func (m *Manager) instanceFor(
+	ctx context.Context, name, directory string,
+) (*serverProcess, error) {
+	server, err := m.configuredNamed(name)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		return false, fmt.Errorf("start language server after root discovery: %w", err)
+	route, err := routeFor(ctx, directory, server.entry.RootMarkers)
+	if err != nil {
+		return nil, err
 	}
-	return m.startSupervisor(lifetimeCtx, proc, workspaceRoot), nil
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	proc, root := m.pickInstance(server, route)
+	if proc != nil {
+		server.lastUsed = proc
+		return proc, nil
+	}
+	if root == "" {
+		return nil, fmt.Errorf(
+			"%s is outside the workspace %s, and no root marker of language server %q "+
+				"matches it; use a file inside the workspace, or add a root marker "+
+				"for this project to the server's configuration",
+			directory, m.root, name)
+	}
+	if m.shuttingDown {
+		return nil, fmt.Errorf("language server %q is shutting down", name)
+	}
+	if len(server.instances) >= maxWorkspaceRootsPerServer {
+		return nil, fmt.Errorf(
+			"language server %q already runs for %d project roots (%s), the maximum; "+
+				"%s needs another, so close every session in this workspace to free them",
+			name, len(server.instances), strings.Join(sortedRoots(server.instances), ", "),
+			root)
+	}
+	proc = newServerProcess(server.entry, root, route.checkout, m.logger)
+	server.instances[root] = proc
+	server.lastUsed = proc
+	return proc, nil
+}
+
+// pickInstance decides which instance serves route, in this order:
+//
+//  1. The instance at the marker root, when one runs there.
+//  2. The deepest instance whose root contains the directory and which
+//     belongs to the same checkout. A nested module shares its repository's
+//     process, but a worktree nested inside a repository, which has a .git
+//     of its own, never reaches the repository's process.
+//  3. When the directory belongs to no checkout, the instance used last. A
+//     module cache or a toolchain's sources is no project of its own: an
+//     agent reaches one by following a definition out of its project, and
+//     the process it came from knows how its project uses that code.
+//  4. Otherwise, a new instance at the marker root, or at the Manager's root
+//     for a directory inside it that no marker claims.
+//
+// It returns the chosen instance, or nil and the root to create one at. An
+// empty root means the directory has no workspace, and the caller refuses
+// it. Called only while m.mu is held.
+func (m *Manager) pickInstance(
+	server *configuredServer, route instanceRoute,
+) (*serverProcess, string) {
+	if route.markerRoot != "" {
+		if proc, ok := server.instances[route.markerRoot]; ok {
+			return proc, ""
+		}
+	}
+
+	var containing *serverProcess
+	for root, proc := range server.instances {
+		if proc.checkout != route.checkout || !pathWithin(route.directory, root) {
+			continue
+		}
+		if containing == nil || len(root) > len(containing.root) {
+			containing = proc
+		}
+	}
+	if containing != nil {
+		return containing, ""
+	}
+	if route.checkout == "" && server.lastUsed != nil {
+		return server.lastUsed, ""
+	}
+
+	if route.markerRoot != "" {
+		return nil, route.markerRoot
+	}
+	if pathWithin(route.directory, m.root) {
+		return nil, m.root
+	}
+	return nil, ""
+}
+
+// routeFor gathers what pickInstance needs to know about directory. Each
+// walk climbs from directory to the filesystem root, so the work is bounded
+// by the directory's depth times one stat per marker, plus one stat per
+// level for the checkout.
+func routeFor(
+	ctx context.Context, directory string, markers config.RootMarkers,
+) (instanceRoute, error) {
+	route := instanceRoute{directory: directory}
+	if len(markers) > 0 {
+		markerRoot, found, err := rootFromMarkers(ctx, directory, markers)
+		if err != nil {
+			return instanceRoute{}, err
+		}
+		if found {
+			route.markerRoot = markerRoot
+		}
+	}
+	checkout, found, err := rootFromMarkers(ctx, directory, checkoutMarkers)
+	if err != nil {
+		return instanceRoute{}, err
+	}
+	if found {
+		route.checkout = checkout
+	}
+	return route, nil
+}
+
+// checkoutMarkers finds a version-control checkout. A git worktree holds a
+// .git file rather than a directory, and a stat matches both.
+var checkoutMarkers = config.RootMarkers{{".git"}}
+
+func sortedRoots(instances map[string]*serverProcess) []string {
+	roots := make([]string, 0, len(instances))
+	for root := range instances {
+		roots = append(roots, root)
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+// pathWithin reports whether path is root or lies below it. Both are
+// absolute and compared lexically, without resolving symbolic links.
+func pathWithin(path, root string) bool {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 // runServer owns proc's process from Start until Shutdown or a done ctx:
@@ -379,6 +583,7 @@ func (m *Manager) runServer(ctx context.Context, proc *serverProcess) {
 
 		m.logger.Debug("language server starting",
 			slog.String("server", proc.entry.Name),
+			slog.String("root", proc.root),
 			slog.String("command", proc.entry.Command),
 			slog.Any("args", proc.entry.Args),
 			slog.Int("attempt", generation))
@@ -392,7 +597,7 @@ func (m *Manager) runServer(ctx context.Context, proc *serverProcess) {
 				slog.Int("attempt", generation),
 				slog.String("error", truncateForLog(err.Error())))
 		} else {
-			if err := proc.handshake(ctx, proc.workspaceRoot()); err != nil {
+			if err := proc.handshake(ctx, proc.root); err != nil {
 				m.logger.Warn("language server handshake failed",
 					slog.String("server", proc.entry.Name),
 					slog.Int("attempt", generation),
@@ -447,25 +652,27 @@ func withinWindow(times []time.Time, window time.Duration) []time.Time {
 	return kept
 }
 
-// WaitReady blocks until the named server is ready, fails permanently, the
+// WaitReady starts the instance of the named server that serves the
+// Manager's root if it is not running yet, and blocks until it is ready, fails permanently, the
 // context is done, or timeout elapses, whichever comes first.
 func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Duration) error {
-	proc, err := m.serverNamed(name)
+	proc, err := m.ensureSupervisor(ctx, name, m.root)
 	if err != nil {
-		return err
-	}
-	if _, err := m.ensureSupervisor(ctx, proc, ""); err != nil {
 		return err
 	}
 
 	// Every started server is on attempt 1 or later, so "after attempt 0"
 	// accepts whichever attempt the server happens to be on.
-	return m.waitReady(ctx, name, timeout, 0)
+	return m.waitReady(ctx, proc, timeout, 0)
 }
 
-// Restart stops the named server and returns once its replacement has
-// passed its own readiness gate. A demand-started server no request has used
-// yet is started instead, because it has no process to replace. A server that
+// Restart stops every running instance of the named server, one per
+// workspace root, and returns once each replacement has passed its own
+// readiness gate. A stale index is as likely in one worktree as in another,
+// and the caller names a server rather than a root, so every root restarts.
+// A demand-started server no request has used yet is started for the
+// Manager's root instead, as a request there would start it, because it has
+// no process to replace. A server that
 // already spent its crash budget takes a restart too: that is the state a
 // restart is most needed in. Waythrough cannot see that a server answers
 // from a stale index, so the caller is the only judge of when a restart is
@@ -483,19 +690,45 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 // rather than lost. Closing this would cost a retry loop around a window
 // no larger than one spawn, which is not a trade this design makes.
 func (m *Manager) Restart(ctx context.Context, name string) error {
-	proc, err := m.serverNamed(name)
+	procs, err := m.instancesNamed(name)
 	if err != nil {
 		return err
 	}
-	started, err := m.ensureSupervisor(ctx, proc, "")
-	if err != nil {
-		return err
+	if len(procs) == 0 {
+		proc, err := m.instanceFor(ctx, name, m.root)
+		if err != nil {
+			return err
+		}
+		procs = []*serverProcess{proc}
 	}
+
+	// Each instance restarts on its own goroutine, so the wait is bounded by
+	// one readiness gate rather than by one per root. The count of instances
+	// is bounded by maxWorkspaceRootsPerServer.
+	errs := make([]error, len(procs))
+	var wait sync.WaitGroup
+	for index, proc := range procs {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errs[index] = m.restartInstance(ctx, proc)
+		}()
+	}
+	wait.Wait()
+	return errors.Join(errs...)
+}
+
+// restartInstance restarts one instance of a server: see Restart.
+func (m *Manager) restartInstance(ctx context.Context, proc *serverProcess) error {
+	m.mu.Lock()
+	lifetimeCtx := m.lifetimeCtx
+	m.mu.Unlock()
+	started := m.startSupervisor(lifetimeCtx, proc)
 	if started || proc.snapshot().status == StatusIdle {
 		// A demand-started server has no process to replace. Starting it is the
 		// only transition that can satisfy the caller's request for a ready one.
 		// Concurrent callers coalesce while the first supervisor claims attempt 1.
-		return m.waitReady(ctx, name, m.readinessTimeout, 0)
+		return m.waitReady(ctx, proc, m.readinessTimeout, 0)
 	}
 
 	// The attempt read here is the one this call retires. Everything below
@@ -503,27 +736,26 @@ func (m *Manager) Restart(ctx context.Context, name string) error {
 	// nor mistake the retired attempt's readiness for the new one's.
 	retired := proc.snapshot().generation
 	m.logger.Debug("restarting language server",
-		slog.String("server", name),
+		slog.String("server", proc.entry.Name),
+		slog.String("root", proc.root),
 		slog.Int("retired_attempt", retired))
 	proc.requestRestart(retired)
 	proc.stopAttempt(ctx, m.shutdownGrace, retired)
-	return m.waitReady(ctx, name, m.readinessTimeout, retired)
+	return m.waitReady(ctx, proc, m.readinessTimeout, retired)
 }
 
-// waitReady blocks until the named server is ready on an attempt later than
+// waitReady blocks until proc is ready on an attempt later than
 // afterGeneration. It loops because a server can move between attempts
 // while a caller waits: each wake re-reads which attempt the server is on
 // and waits on that attempt's channels instead of on a channel this
 // generation has abandoned. The deadline bounds the loop, and each attempt
 // closes its channels exactly once, so no wake can repeat.
 func (m *Manager) waitReady(
-	ctx context.Context, name string, timeout time.Duration, afterGeneration int,
+	ctx context.Context, proc *serverProcess, timeout time.Duration, afterGeneration int,
 ) error {
-	proc, err := m.serverNamed(name)
-	if err != nil {
-		return err
-	}
-
+	// The root is part of every message, so that an agent told one of
+	// several instances failed can tell which project it serves.
+	name := fmt.Sprintf("%s (%s)", strconv.Quote(proc.entry.Name), proc.root)
 	deadline := time.Now().Add(timeout)
 
 	for {
@@ -538,14 +770,14 @@ func (m *Manager) waitReady(
 			case StatusReady:
 				return nil
 			case StatusFailed:
-				return fmt.Errorf("language server %q failed to start", name)
+				return fmt.Errorf("language server %s failed to start", name)
 			}
 			wake = state.readyCh
 		}
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return fmt.Errorf("language server %q is still starting", name)
+			return fmt.Errorf("language server %s is still starting", name)
 		}
 
 		timer := time.NewTimer(remaining)
@@ -554,9 +786,9 @@ func (m *Manager) waitReady(
 			timer.Stop()
 		case <-proc.stoppingCh:
 			timer.Stop()
-			return fmt.Errorf("language server %q is shutting down", name)
+			return fmt.Errorf("language server %s is shutting down", name)
 		case <-timer.C:
-			return fmt.Errorf("language server %q is still starting", name)
+			return fmt.Errorf("language server %s is still starting", name)
 		case <-ctx.Done():
 			timer.Stop()
 			return fmt.Errorf("waiting for language server %q: %w", name, ctx.Err())
@@ -564,11 +796,22 @@ func (m *Manager) waitReady(
 	}
 }
 
-// Status reports the named server's current lifecycle status.
+// Status reports the lifecycle status of the named server's instance that
+// serves the Manager's root, and StatusIdle when no request has started it.
 func (m *Manager) Status(name string) (Status, error) {
-	proc, err := m.serverNamed(name)
+	server, err := m.configuredNamed(name)
 	if err != nil {
 		return 0, err
+	}
+	route, err := routeFor(context.Background(), m.root, server.entry.RootMarkers)
+	if err != nil {
+		return 0, err
+	}
+	m.mu.Lock()
+	proc, _ := m.pickInstance(server, route)
+	m.mu.Unlock()
+	if proc == nil {
+		return StatusIdle, nil
 	}
 	return proc.snapshot().status, nil
 }
@@ -576,7 +819,7 @@ func (m *Manager) Status(name string) (Status, error) {
 // Definition asks the named server for the definition at a 1-based
 // line/column in file, waiting for the server to be ready first and
 // syncing the file's current on-disk content to it before asking. file may
-// be relative to Manager's root or absolute.
+// be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) Definition(
 	ctx context.Context, name, file string, line, column int,
 ) ([]Location, error) {
@@ -597,7 +840,7 @@ func (m *Manager) Definition(
 // References asks the named server for every reference to the symbol at a
 // 1-based line/column in file, waiting for the server to be ready first and
 // syncing the file's current on-disk content to it before asking. file may
-// be relative to Manager's root or absolute.
+// be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) References(
 	ctx context.Context, name, file string, line, column int,
 ) ([]Location, error) {
@@ -624,7 +867,7 @@ func (m *Manager) References(
 // Rename asks the named server for the workspace edit that renames the
 // symbol at a 1-based line/column in file to newName, waiting for the
 // server to be ready first and syncing the file's current on-disk content
-// to it before asking. file may be relative to Manager's root or absolute.
+// to it before asking. file may be absolute, or relative to Manager's root as resolvePath allows.
 // Rename does not write the edit to disk; the caller applies it.
 func (m *Manager) Rename(
 	ctx context.Context, name, file string, line, column int, newName string,
@@ -647,7 +890,7 @@ func (m *Manager) Rename(
 // SignatureHelp asks the named server which signatures the call at a 1-based
 // line/column in file could match, waiting for the server to be ready first
 // and syncing the file's current on-disk content to it before asking. file
-// may be relative to Manager's root or absolute.
+// may be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) SignatureHelp(
 	ctx context.Context, name, file string, line, column int,
 ) (SignatureHelp, error) {
@@ -678,15 +921,15 @@ func (m *Manager) CallHierarchy(
 			"call hierarchy direction must be incoming or outgoing, got %q", direction)
 	}
 
-	proc, err := m.serverNamed(name)
+	path, err := m.resolvePath(ctx, file)
 	if err != nil {
 		return nil, err
 	}
-	path := m.resolvePath(file)
-	if _, err := m.ensureSupervisor(ctx, proc, path); err != nil {
+	proc, err := m.ensureSupervisor(ctx, name, filepath.Dir(path))
+	if err != nil {
 		return nil, err
 	}
-	if err := m.WaitReady(ctx, name, m.readinessTimeout); err != nil {
+	if err := m.waitReady(ctx, proc, m.readinessTimeout, 0); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, m.callHierarchyTimeout)
@@ -869,7 +1112,7 @@ func requestDirectedCall(
 
 // Diagnostics asks the named server what is wrong in file, waiting for the
 // server to be ready first and syncing the file's current on-disk content to
-// it before asking. file may be relative to Manager's root or absolute. A
+// it before asking. file may be absolute, or relative to Manager's root as resolvePath allows. A
 // diagnostic belongs to the file as a whole, so this takes no position.
 //
 // Only a server that advertised pull diagnostics at its handshake is asked.
@@ -897,15 +1140,15 @@ func (m *Manager) Diagnostics(ctx context.Context, name, file string) ([]Diagnos
 // file's current on-disk content to it — the setup every LSP position
 // request needs before it can ask the server anything.
 func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProcess, string, error) {
-	proc, err := m.serverNamed(name)
+	path, err := m.resolvePath(ctx, file)
 	if err != nil {
 		return nil, "", err
 	}
-	path := m.resolvePath(file)
-	if _, err := m.ensureSupervisor(ctx, proc, path); err != nil {
+	proc, err := m.ensureSupervisor(ctx, name, filepath.Dir(path))
+	if err != nil {
 		return nil, "", err
 	}
-	if err := m.WaitReady(ctx, name, m.readinessTimeout); err != nil {
+	if err := m.waitReady(ctx, proc, m.readinessTimeout, 0); err != nil {
 		return nil, "", err
 	}
 
@@ -929,45 +1172,66 @@ func textDocumentPosition(path string, line, column int) protocol.TextDocumentPo
 	}
 }
 
-func (m *Manager) resolvePath(file string) string {
+// resolvePath makes file absolute and clean, so that the root it selects
+// and the containment checks in pickInstance both see one spelling of it.
+//
+// A relative file resolves against the Manager's root only when that root
+// is inside a git checkout. An agent started from a global configuration
+// can run Waythrough in a home directory or in /, where a relative path
+// names no file the agent meant, so such a path fails and asks for an
+// absolute one rather than reach whatever file it happens to name. The
+// check climbs from the root once per relative request, one stat a level,
+// so a checkout created after Waythrough started is seen.
+func (m *Manager) resolvePath(ctx context.Context, file string) (string, error) {
 	if filepath.IsAbs(file) {
-		return file
+		return filepath.Clean(file), nil
 	}
-	return filepath.Join(m.root, file)
+	_, inCheckout, err := rootFromMarkers(ctx, m.root, checkoutMarkers)
+	if err != nil {
+		return "", err
+	}
+	if !inCheckout {
+		return "", fmt.Errorf(
+			"relative path %q needs a workspace, but the working directory %s "+
+				"is not inside a git checkout; pass an absolute path",
+			file, m.root)
+	}
+	return filepath.Join(m.root, file), nil
 }
 
+// rootFromMarkers walks from startDirectory to the filesystem root once per
+// marker group, in priority order, and reports the first directory holding
+// a marker. found is false when no group matches. The walk is bounded by the
+// directory's depth times the marker count, one stat each.
+//
+// Precondition: startDirectory is absolute.
 func rootFromMarkers(
-	ctx context.Context, requestedFile string, markers config.RootMarkers, fallbackRoot string,
-) (string, error) {
+	ctx context.Context, startDirectory string, markers config.RootMarkers,
+) (root string, found bool, err error) {
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("discover root from %s: %w", requestedFile, err)
+		return "", false, fmt.Errorf("discover root from %s: %w", startDirectory, err)
 	}
-	absoluteFile, err := filepath.Abs(requestedFile)
-	if err != nil {
-		return "", fmt.Errorf("resolve requested file %s: %w", requestedFile, err)
-	}
-	startDirectory := filepath.Dir(absoluteFile)
 
 	for groupIndex, group := range markers {
 		for directory := startDirectory; ; directory = filepath.Dir(directory) {
 			for _, marker := range group {
 				if err := ctx.Err(); err != nil {
-					return "", fmt.Errorf("discover root from %s: %w", requestedFile, err)
+					return "", false, fmt.Errorf("discover root from %s: %w", startDirectory, err)
 				}
 				_, err := os.Stat(filepath.Join(directory, marker))
 				if contextErr := ctx.Err(); contextErr != nil {
-					return "", fmt.Errorf(
-						"discover root from %s: %w", requestedFile, contextErr)
+					return "", false, fmt.Errorf(
+						"discover root from %s: %w", startDirectory, contextErr)
 				}
 				switch {
 				case err == nil:
-					return directory, nil
+					return directory, true, nil
 				case errors.Is(err, os.ErrNotExist):
 					continue
 				default:
-					return "", fmt.Errorf(
+					return "", false, fmt.Errorf(
 						"inspect root_markers group %d from %s: %w",
-						groupIndex, requestedFile, err)
+						groupIndex, startDirectory, err)
 				}
 			}
 
@@ -977,7 +1241,7 @@ func rootFromMarkers(
 			}
 		}
 	}
-	return fallbackRoot, nil
+	return "", false, nil
 }
 
 func locationsFromDefinitionResult(
@@ -1414,24 +1678,24 @@ func locationFromRange(docURI uri.URI, sourceRange protocol.Range) Location {
 	}
 }
 
-// serverNamed finds the configured server called name. A name that matches
+// configuredNamed finds the configured server called name. A name that matches
 // none of them comes back with the names that would have matched: a coding
 // agent picks a server by name, so the error it reads has to leave it able
 // to make the call work, rather than guess again.
-func (m *Manager) serverNamed(name string) (*serverProcess, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	proc, ok := m.procs[name]
+//
+// servers is fixed by NewManager and never written again, so reading it
+// needs no lock.
+func (m *Manager) configuredNamed(name string) (*configuredServer, error) {
+	server, ok := m.servers[name]
 	if ok {
-		return proc, nil
+		return server, nil
 	}
-	if len(m.procs) == 0 {
+	if len(m.servers) == 0 {
 		return nil, fmt.Errorf("no language server named %q: none is configured", name)
 	}
 
-	configured := make([]string, 0, len(m.procs))
-	for configuredName := range m.procs {
+	configured := make([]string, 0, len(m.servers))
+	for configuredName := range m.servers {
 		configured = append(configured, configuredName)
 	}
 	sort.Strings(configured)
@@ -1439,13 +1703,32 @@ func (m *Manager) serverNamed(name string) (*serverProcess, error) {
 		name, strings.Join(configured, ", "))
 }
 
+// instancesNamed lists every instance of the named server, one per
+// workspace root a request has needed.
+func (m *Manager) instancesNamed(name string) ([]*serverProcess, error) {
+	server, err := m.configuredNamed(name)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	procs := make([]*serverProcess, 0, len(server.instances))
+	for _, proc := range server.instances {
+		procs = append(procs, proc)
+	}
+	return procs, nil
+}
+
 // Shutdown sends `shutdown` and `exit` to every running server and waits
 // for its process to exit, killing it after shutdownGrace if it does not.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
-	procs := make([]*serverProcess, 0, len(m.procs))
-	for _, proc := range m.procs {
-		procs = append(procs, proc)
+	m.shuttingDown = true
+	procs := make([]*serverProcess, 0, len(m.servers))
+	for _, server := range m.servers {
+		for _, proc := range server.instances {
+			procs = append(procs, proc)
+		}
 	}
 	m.mu.Unlock()
 
@@ -1462,17 +1745,20 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// serverProcess is one managed language-server subprocess, across however
-// many spawn attempts it takes: its current OS process, its LSP session,
-// and its readiness state.
+// serverProcess is one managed language-server subprocess at one workspace
+// root, across however many spawn attempts it takes: its current OS
+// process, its LSP session, and its readiness state.
 //
-// restartCh and stoppingCh outlive every attempt and are never reassigned,
-// so any goroutine may read them without the lock. Every other field here
-// belongs to one attempt, and beginAttempt replaces it.
+// entry, root, checkout, logger, restartCh and stoppingCh outlive every attempt and
+// are never reassigned, so any goroutine may read them without the lock.
+// Every other field here belongs to one attempt, and beginAttempt replaces
+// it.
 type serverProcess struct {
-	entry      config.LanguageServer
-	root       string
-	rootChoice *workspaceRootSelection
+	entry config.LanguageServer
+	root  string
+	// checkout is the version-control checkout the request that created
+	// this instance came from, and is empty for none. See pickInstance.
+	checkout   string
 	logger     *slog.Logger
 	restartCh  chan struct{}
 	stoppingCh chan struct{}
@@ -1505,12 +1791,6 @@ type serverProcess struct {
 	// never delays the replacement. It is a channel rather than a mutex so
 	// that a caller can stop waiting when its context ends.
 	syncSlot chan struct{}
-}
-
-type workspaceRootSelection struct {
-	done chan struct{}
-	root string
-	err  error
 }
 
 // serverAttempt identifies one concrete LSP connection. A generation alone
@@ -1760,70 +2040,14 @@ func acquireSyncSlot(ctx context.Context, attempt serverAttempt, path string) er
 // beginSupervision reserves this server for one supervisor goroutine. It
 // reports false when a supervisor already owns it, so no two goroutines can
 // ever call exec.Cmd.Wait on the same process.
-func (p *serverProcess) beginSupervision(workspaceRoot string) bool {
+func (p *serverProcess) beginSupervision() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.supervised != nil || p.shuttingDown {
 		return false
 	}
-	p.root = workspaceRoot
 	p.supervised = make(chan struct{})
 	return true
-}
-
-func (p *serverProcess) workspaceRoot() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.root
-}
-
-// selectWorkspaceRoot lets one first request inspect the filesystem. Other
-// first requests wait for that result instead of repeating the same walk.
-// A failed selection is shared with current waiters, but a later request can
-// retry a transient filesystem failure.
-func (p *serverProcess) selectWorkspaceRoot(
-	ctx context.Context, resolve func(context.Context) (string, error),
-) (string, error) {
-	for {
-		p.mu.Lock()
-		if p.root != "" {
-			root := p.root
-			p.mu.Unlock()
-			return root, nil
-		}
-		if selection := p.rootChoice; selection != nil {
-			p.mu.Unlock()
-			select {
-			case <-ctx.Done():
-				return "", fmt.Errorf("wait for workspace root: %w", ctx.Err())
-			case <-selection.done:
-				selectionCanceled := errors.Is(selection.err, context.Canceled) ||
-					errors.Is(selection.err, context.DeadlineExceeded)
-				if selectionCanceled && ctx.Err() == nil {
-					continue
-				}
-				return selection.root, selection.err
-			}
-		}
-
-		selection := &workspaceRootSelection{done: make(chan struct{})}
-		p.rootChoice = selection
-		p.mu.Unlock()
-
-		root, err := resolve(ctx)
-
-		p.mu.Lock()
-		if err == nil {
-			p.root = root
-		}
-		selection.root = root
-		selection.err = err
-		p.rootChoice = nil
-		close(selection.done)
-		p.mu.Unlock()
-
-		return root, err
-	}
 }
 
 // endSupervision reports that the supervisor goroutine has returned, which
