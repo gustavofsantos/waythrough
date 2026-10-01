@@ -88,13 +88,18 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
+	return Parse(data, path)
+}
 
+// Parse parses configuration content. source names where data came from,
+// for error messages. A caller that must know exactly which bytes it parsed,
+// such as one that hashes them, reads the file itself and calls Parse.
+func Parse(data []byte, source string) (Config, error) {
 	var cfg Config
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("parse %s: %w", path, err)
+		return Config{}, fmt.Errorf("parse %s: %w", source, err)
 	}
-
 	return cfg, nil
 }

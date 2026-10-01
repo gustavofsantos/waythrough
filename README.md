@@ -255,6 +255,68 @@ target to list the rest, or see
    `waythrough validate` checks the same `~/.waythrough.yaml` file that
    `serve` reads. Empty files and unknown configuration fields are rejected.
 
+## Share language servers across sessions
+
+Each `serve` starts its own language servers. When you run several
+agent sessions in one repository, each of them indexes the same code
+again. Pass `--shared` so that all of them use one set of servers:
+
+```json
+{
+  "mcpServers": {
+    "waythrough": {
+      "command": "waythrough",
+      "args": ["serve", "--shared"]
+    }
+  }
+}
+```
+
+The first `--shared` session in a workspace starts a background daemon.
+That daemon starts the language servers when a tool first needs them,
+as `serve` does without the flag. Every later session in the workspace
+connects to the same daemon, so it gets answers from servers that are
+already indexed.
+
+When the last session closes, the daemon keeps its servers for one
+minute, then stops them and exits. A session that crashes counts as
+closed. The one-minute wait keeps the index warm when an agent
+reconnects, or when you start the next session soon after the last one.
+Set `--linger=0s` to stop at once, or give a longer duration, such as
+`--linger=10m`. The session that starts the daemon sets this value.
+
+These sessions share a daemon:
+
+- They start in the same directory.
+- They read the same `~/.waythrough.yaml`, byte for byte.
+- They run the same `waythrough` build.
+- They have the same `PATH`.
+
+A session that differs in any of these gets its own daemon. For example,
+if you edit the configuration, the next session starts a new daemon. The
+old daemon stops when its own sessions end. Language servers inherit the
+environment of the session that started the daemon. To pin a variable
+that a server needs, set it in that server's `env` in the configuration.
+
+The daemon keeps its socket, its locks, and its log in a private
+directory, so only your user can connect:
+
+- `$XDG_RUNTIME_DIR/waythrough/` when that variable is set.
+- Otherwise, `waythrough-<uid>` in the system temporary directory.
+
+With `--debug`, the daemon writes its records to `<key>.log` in that
+directory, in place of your agent's stderr, at the debug level of the
+session that started it. Each new daemon clears its log. A log stops
+growing at 16 MiB.
+
+If the daemon is killed, the language servers it started lose their
+parent. Most of them, `gopls` among them, exit when their input closes.
+A server that does not exit keeps running beside the copy that the next
+daemon starts. A `serve` that is killed without `--shared` leaves the
+same gap.
+
+`--shared` works on Linux and macOS.
+
 ## Tools
 
 Waythrough exposes these MCP tools to a connected coding agent:
@@ -293,6 +355,9 @@ Waythrough exposes these MCP tools to a connected coding agent:
   language server keeps running. Use it when a server's answers no
   longer match the code on disk. Waythrough cannot see that a
   server answers from a stale index, so your agent must decide.
+  With `--shared`, the restart reaches every session in the
+  workspace. A call those sessions have in flight fails and says the
+  server restarted.
 
 File-based tools accept regular source files up to 16 MiB. Waythrough rejects
 larger files and non-regular paths before it sends content to a language server.

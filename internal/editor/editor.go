@@ -33,7 +33,9 @@ func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Serv
 	e := &editor{manager: manager, serverForExt: routeByExtension(cfg)}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "waythrough", Version: "0.1.0"}, nil)
-	server.AddReceivingMiddleware(logMethodCalls(logger))
+	// recoverPanics comes first, so it is outermost and also covers a panic
+	// in the logging middleware.
+	server.AddReceivingMiddleware(recoverPanics(logger), logMethodCalls(logger))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_definition",
 		Description: "Find where the symbol at a file position is defined.",
@@ -70,7 +72,8 @@ func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Serv
 		Name: "restart_server",
 		Description: "Restart one language server by name, and wait until its " +
 			"replacement can answer. Use it when a server's answers no longer " +
-			"match the code on disk. Every other language server keeps running.",
+			"match the code on disk. Every other language server keeps running. " +
+			"Every session sharing this server sees the restart too.",
 	}, e.restartServer)
 
 	return server

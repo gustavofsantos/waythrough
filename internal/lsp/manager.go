@@ -1500,6 +1500,11 @@ type serverProcess struct {
 	shuttingDown bool
 	supervised   chan struct{}
 	openFiles    map[string]openFile
+	// syncSlot holds one token while a file sync of this attempt runs. Each
+	// attempt gets its own, so a sync stuck writing to a retired process
+	// never delays the replacement. It is a channel rather than a mutex so
+	// that a caller can stop waiting when its context ends.
+	syncSlot chan struct{}
 }
 
 type workspaceRootSelection struct {
@@ -1515,6 +1520,7 @@ type serverAttempt struct {
 	generation int
 	server     protocol.Server
 	conn       jsonrpc2.Conn
+	syncSlot   chan struct{}
 }
 
 // attemptState is what a waiter needs to know about a server at one
@@ -1596,6 +1602,7 @@ func (p *serverProcess) callHierarchyAttempt(name string) (serverAttempt, error)
 		generation: p.generation,
 		server:     p.server,
 		conn:       p.conn,
+		syncSlot:   p.syncSlot,
 	}, nil
 }
 
@@ -1626,14 +1633,26 @@ func (p *serverProcess) syncFile(ctx context.Context, path string) error {
 		p.mu.Unlock()
 		return fmt.Errorf("language server restarted while syncing %s", path)
 	}
-	attempt := serverAttempt{generation: p.generation, server: p.server}
+	attempt := serverAttempt{
+		generation: p.generation, server: p.server, syncSlot: p.syncSlot,
+	}
 	p.mu.Unlock()
 	return p.syncFileOnAttempt(ctx, path, attempt)
 }
 
+// syncFileOnAttempt holds the attempt's sync slot from the file read through
+// the open-file update. Without it, two concurrent calls could both find the
+// file unopened and send didOpen twice, or send one version number with two
+// different texts. The read sits inside the hold so the newest text always
+// goes out last.
 func (p *serverProcess) syncFileOnAttempt(
 	ctx context.Context, path string, attempt serverAttempt,
 ) error {
+	if err := acquireSyncSlot(ctx, attempt, path); err != nil {
+		return err
+	}
+	defer func() { <-attempt.syncSlot }()
+
 	content, err := readSourceFile(ctx, path)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
@@ -1654,39 +1673,9 @@ func (p *serverProcess) syncFileOnAttempt(
 	prev, wasOpen := p.openFiles[path]
 	p.mu.Unlock()
 
-	docURI := uri.File(path)
-
-	// Each notification names itself in its error. The two share a return
-	// path but not a cause, so one shared wrap would label a failed didOpen
-	// as a didChange, and vice versa.
-	if !wasOpen {
-		err = attempt.server.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
-			TextDocument: protocol.TextDocumentItem{
-				URI:        docURI,
-				LanguageID: protocol.LanguageKind(languageID),
-				Version:    1,
-				Text:       text,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("didOpen: %w", err)
-		}
-		prev = openFile{content: text, version: 1}
-	} else if prev.content != text {
-		prev.version++
-		prev.content = text
-		err = attempt.server.DidChange(ctx, &protocol.DidChangeTextDocumentParams{
-			TextDocument: protocol.VersionedTextDocumentIdentifier{
-				TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: docURI},
-				Version:                prev.version,
-			},
-			ContentChanges: []protocol.TextDocumentContentChangeEvent{
-				&protocol.TextDocumentContentChangeWholeDocument{Text: text},
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("didChange: %w", err)
-		}
+	synced, err := notifyDocument(ctx, attempt.server, path, languageID, text, prev, wasOpen)
+	if err != nil {
+		return err
 	}
 
 	p.mu.Lock()
@@ -1697,10 +1686,75 @@ func (p *serverProcess) syncFileOnAttempt(
 	if p.openFiles == nil {
 		p.openFiles = make(map[string]openFile)
 	}
-	p.openFiles[path] = prev
+	p.openFiles[path] = synced
 	p.mu.Unlock()
 
 	return nil
+}
+
+// notifyDocument tells server about text: didOpen when the file was not yet
+// open, didChange when it was open with other text, and nothing when the
+// server already holds this text. It returns what the server now holds.
+//
+// Each notification names itself in its error. The two share a return path
+// but not a cause, so one shared wrap would label a failed didOpen as a
+// didChange, and vice versa.
+func notifyDocument(
+	ctx context.Context,
+	server protocol.Server,
+	path, languageID, text string,
+	prev openFile,
+	wasOpen bool,
+) (openFile, error) {
+	docURI := uri.File(path)
+	if !wasOpen {
+		err := server.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
+			TextDocument: protocol.TextDocumentItem{
+				URI:        docURI,
+				LanguageID: protocol.LanguageKind(languageID),
+				Version:    1,
+				Text:       text,
+			},
+		})
+		if err != nil {
+			return openFile{}, fmt.Errorf("didOpen: %w", err)
+		}
+		return openFile{content: text, version: 1}, nil
+	}
+	if prev.content == text {
+		return prev, nil
+	}
+
+	next := openFile{content: text, version: prev.version + 1}
+	err := server.DidChange(ctx, &protocol.DidChangeTextDocumentParams{
+		TextDocument: protocol.VersionedTextDocumentIdentifier{
+			TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: docURI},
+			Version:                next.version,
+		},
+		ContentChanges: []protocol.TextDocumentContentChangeEvent{
+			&protocol.TextDocumentContentChangeWholeDocument{Text: text},
+		},
+	})
+	if err != nil {
+		return openFile{}, fmt.Errorf("didChange: %w", err)
+	}
+	return next, nil
+}
+
+// acquireSyncSlot waits for the attempt's sync slot or for ctx to end. A
+// notification write ignores its context, so a server that stops reading
+// holds the slot until its process is stopped. Restart and shutdown never
+// take the slot, which keeps them able to stop that process.
+func acquireSyncSlot(ctx context.Context, attempt serverAttempt, path string) error {
+	if attempt.syncSlot == nil {
+		panic("lsp: file sync on an attempt with no sync slot")
+	}
+	select {
+	case attempt.syncSlot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("wait for file sync of %s: %w", path, ctx.Err())
+	}
 }
 
 // beginSupervision reserves this server for one supervisor goroutine. It
@@ -1869,6 +1923,7 @@ func (p *serverProcess) beginAttempt() (int, bool) {
 	p.everSawToken = false
 	p.retiring = false
 	p.openFiles = nil
+	p.syncSlot = make(chan struct{}, 1)
 	p.capabilities = protocol.ServerCapabilities{}
 	p.status = StatusStarting
 
@@ -1887,6 +1942,7 @@ func (p *serverProcess) beginAttempt() (int, bool) {
 // Go allows exactly one.
 func (p *serverProcess) startProcess(ctx context.Context, generation int) error {
 	cmd := exec.CommandContext(ctx, p.entry.Command, p.entry.Args...)
+	cmd.Env = serverEnvironment(os.Environ(), p.entry.Env)
 
 	// A language server explains a bad start on its own stderr, and that is
 	// the one account of it Waythrough can offer. Capturing it costs a
@@ -1938,6 +1994,25 @@ func (p *serverProcess) startProcess(ctx context.Context, generation int) error 
 		stderrLog.flush()
 	}
 	return fmt.Errorf("start %s: %w", p.entry.Command, errShutdownBegan)
+}
+
+// serverEnvironment is the environment a language server starts with: the
+// one Waythrough inherited, then each configured variable in name order. A
+// configured variable wins over an inherited one of the same name, because
+// os/exec keeps the last value it sees for a name.
+func serverEnvironment(inherited []string, configured map[string]string) []string {
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	environment := make([]string, 0, len(inherited)+len(names))
+	environment = append(environment, inherited...)
+	for _, name := range names {
+		environment = append(environment, name+"="+configured[name])
+	}
+	return environment
 }
 
 // errShutdownBegan reports a spawn abandoned because the manager is

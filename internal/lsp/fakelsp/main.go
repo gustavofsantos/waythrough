@@ -73,6 +73,8 @@ var (
 	initializeLog             = flag.String("initialize-log", "", "path to a file that receives the initialize params as JSON, one request per line — lets a test verify the workspace root observed by the server")
 	syncLog                   = flag.String("sync-log", "", "path to a file that receives one JSON line per didOpen/didChange notification, recording the method, uri, version, and full text sent — lets a test assert Waythrough actually synced current content, not just that some document is open")
 	instanceLog               = flag.String("instance-log", "", "path to a file that receives this process's pid on every process start, one per line — lets a restart test read that the old process ended and that a different one now serves, which no LSP message reports")
+	envLog                    = flag.String("env-log", "", "path to a file that receives NAME=value for the variable -env-name names, one line per process start — lets a test read the environment Waythrough gave this server")
+	envName                   = flag.String("env-name", "", "the environment variable -env-log records")
 	stderrLine                = flag.String("stderr-line", "", "text to write to this process's own stderr at startup, followed by a newline — lets a test assert Waythrough surfaces what a language server says about itself, which no LSP message carries")
 	stderrPartial             = flag.String("stderr-partial", "", "text to write to this process's own stderr at startup with no trailing newline — the tail a server that dies mid-sentence leaves behind")
 
@@ -101,6 +103,7 @@ func main() {
 	// The pid is recorded before any flag can end this run, so the log
 	// counts every process start, including the ones that crash on purpose.
 	logInstance()
+	logEnvironment()
 
 	// Written before any flag can end this run, for the same reason: a
 	// server that crashes on purpose is exactly the one whose stderr a
@@ -272,6 +275,23 @@ func logInstance() {
 	f := openLog("instance-log", *instanceLog)
 	defer func() { _ = f.Close() }()
 	_, _ = fmt.Fprintln(f, os.Getpid())
+}
+
+// logEnvironment appends -env-name's value to -env-log, if set, as NAME=value.
+// An unset variable is recorded as NAME unset, which a test can tell apart
+// from one set to the empty string.
+func logEnvironment() {
+	if *envLog == "" {
+		return
+	}
+	f := openLog("env-log", *envLog)
+	defer func() { _ = f.Close() }()
+	value, ok := os.LookupEnv(*envName)
+	if !ok {
+		_, _ = fmt.Fprintln(f, *envName, "unset")
+		return
+	}
+	_, _ = fmt.Fprintf(f, "%s=%s\n", *envName, value)
 }
 
 // logRequest appends one method name to -request-log, if set, for every

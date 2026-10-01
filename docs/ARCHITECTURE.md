@@ -10,10 +10,11 @@ tools and check a change.
 | Path | Content |
 | --- | --- |
 | `cmd/waythrough/` | The `main` package. It only calls `cli.Execute`. |
-| `internal/cli/` | The `waythrough` command-line interface: `init`, `instructions`, `validate`, and `serve`. |
+| `internal/cli/` | The `waythrough` command-line interface: `init`, `instructions`, `validate`, `serve`, and the hidden `daemon` that `serve --shared` starts. |
 | `internal/config/` | The user configuration schema, loader, validator, and init-only language-server presets. |
 | `internal/lsp/` | Process lifecycle for each configured language server, and the LSP client that talks to it. |
 | `internal/lsp/fakelsp/` | A small language server built only for `internal/lsp` tests. |
+| `internal/daemon/` | Shared mode: the workspace key, the private runtime directory, the locks, the daemon's session registry, and the client's attach and proxy. |
 | `internal/editor/` | The MCP server. It turns each MCP tool call into an LSP request, and the LSP response back into MCP output. |
 | `scripts/` | `check.sh`, the check script, and `install-git-hooks.sh`, the hook installer. |
 | `.github/workflows/` | The CI workflow and the release workflow. |
@@ -51,6 +52,9 @@ tools and check a change.
    because it acts on a whole server rather than on a file.
 6. When `serve` exits, it shuts down every language server the
    manager started.
+
+With `--shared`, the daemon does steps 2 through 6, and each `serve`
+relays its stdio to the daemon. See [Shared mode](#shared-mode).
 
 ### Request sequence
 
@@ -142,6 +146,96 @@ stateDiagram-v2
   Failed --> Stopped: serve exits
   Stopped --> [*]
 ```
+
+## Shared mode
+
+`serve --shared` moves steps 2 through 6 of the request flow into a
+daemon. One daemon serves each workspace. Each `serve` only attaches to
+the daemon and copies bytes between its own stdio and the daemon's
+socket. The daemon runs the same `lsp.Manager` and the same
+`editor.New` server as a plain `serve`. It serves one MCP session for
+each connection, and every session uses the one server.
+
+```mermaid
+flowchart LR
+  a1["Agent 1"] <-->|stdio| p1["serve --shared"]
+  a2["Agent 2"] <-->|stdio| p2["serve --shared"]
+  p1 <-->|unix socket| d["waythrough daemon<br/>lsp.Manager + mcp.Server"]
+  p2 <-->|unix socket| d
+  d --> ls["language servers"]
+```
+
+Each daemon has a workspace key. The key is a hash of the `waythrough`
+build, the working directory, the configuration bytes, and `PATH`.
+`internal/daemon/workspace.go` explains why each input is part of it.
+The socket, the two lock files, and the log for each key are in a
+private runtime directory. `internal/daemon/runtimedir.go` refuses that
+directory unless the current user owns it, it is not a symlink, and no
+other user can enter it. Both ends of each connection also check the
+peer's uid.
+
+A session attaches in these steps:
+
+1. It dials the key's socket. A daemon answers with one greeting line,
+   and it sends that line only after it has counted the session.
+2. If no daemon greets, the client takes the key's spawn lock and dials
+   again. If still no daemon greets, it starts `waythrough daemon` in
+   a new session, with `setsid`, and dials until the daemon greets.
+3. One 30-second deadline covers all of these steps.
+
+The daemon holds the key's daemon lock for its whole life. The kernel
+releases a `flock` on any exit, so at most one daemon is alive for a key,
+and a crash never leaves a stale lock. A new daemon waits on this lock
+while its predecessor drains. Only after it takes the lock does it
+remove a stale socket or truncate the log.
+
+The registry in `internal/daemon/registry.go` makes the drain decision.
+In one hold of its lock, it checks that no session is connected and that
+the timer that fired is the current one. In the same hold, it marks the
+daemon draining and closes the listener. A daemon therefore never admits
+a session after it decides to stop. The client of a draining daemon
+reads EOF in place of a greeting, and it attaches again.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Locking
+  Locking --> Listening: daemon lock acquired
+  Listening --> Serving: first session
+  Listening --> Draining: startup grace expired
+  Serving --> Lingering: last session left
+  Lingering --> Serving: a session arrived
+  Lingering --> Draining: linger expired
+  Serving --> Draining: SIGTERM or SIGINT
+  Draining --> [*]: servers shut down, lock released
+```
+
+The startup grace lasts until the attach deadline of the session that
+started the daemon. Another session can attach and leave before that
+session dials, and a short linger can then drain the daemon. A daemon
+that drains exits cleanly, and every failure exits with an error. A
+clean exit therefore tells the session that started the daemon to start
+another one, and its deadline bounds how often that can happen.
+
+A session counts as gone when its client's end of the socket closes. If
+a call is stuck writing to a language server that stopped reading, the
+daemon still uncounts the session five seconds later. Otherwise one
+stuck call would keep every server running with no client left. The
+stuck call ends when the drain stops that server.
+
+The decrement for each session is registered before any step that can
+fail. A client that leaves before its greeting therefore cannot leave a
+count that keeps the daemon alive.
+
+Two changes keep shared state safe:
+
+- `syncFileOnAttempt` holds a one-slot channel for each attempt. Two
+  sessions that sync one file therefore never send `didOpen` twice, and
+  never send one version with two texts. The slot is a channel, so a
+  caller queued behind a hung server can still give up when its context
+  ends.
+- `internal/editor/recover.go` turns a panic in a handler into an error
+  for that request. Without it, one faulty call would end every session
+  in the workspace.
 
 ## Debug logging
 

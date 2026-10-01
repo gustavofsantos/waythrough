@@ -286,6 +286,33 @@ var _ = Describe("Manager", func() {
 		})
 	})
 
+	Describe("a server's environment", func() {
+		It("inherits Waythrough's environment, overridden by the entry's env", func() {
+			envLog := filepath.Join(GinkgoT().TempDir(), "env.log")
+			GinkgoT().Setenv("WAYTHROUGH_TEST_INHERITED", "inherited")
+			GinkgoT().Setenv("WAYTHROUGH_TEST_OVERRIDDEN", "inherited")
+
+			inherited := fakeEntry("-env-log="+envLog, "-env-name=WAYTHROUGH_TEST_INHERITED")
+			inherited.Name = "inherited"
+			overridden := fakeEntry("-env-log="+envLog, "-env-name=WAYTHROUGH_TEST_OVERRIDDEN")
+			overridden.Name = "overridden"
+			overridden.Filetypes = map[string]string{".other": "other"}
+			overridden.Env = map[string]string{"WAYTHROUGH_TEST_OVERRIDDEN": "configured"}
+
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{inherited, overridden})
+			Expect(manager.Start(ctx)).To(Succeed())
+			Expect(manager.WaitReady(ctx, "inherited", time.Second)).To(Succeed())
+			Expect(manager.WaitReady(ctx, "overridden", time.Second)).To(Succeed())
+			DeferCleanup(func() { _ = manager.Shutdown(context.Background()) })
+
+			Expect(logLines(envLog)).To(ConsistOf(
+				"WAYTHROUGH_TEST_INHERITED=inherited",
+				"WAYTHROUGH_TEST_OVERRIDDEN=configured",
+			))
+		})
+	})
+
 	Describe("syncing a file's content", func() {
 		var (
 			file    string

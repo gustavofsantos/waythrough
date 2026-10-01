@@ -227,6 +227,20 @@ var _ = Describe("Validate", func() {
 		Entry("handshake", config.ReadinessHandshake),
 	)
 
+	DescribeTable("rejects environment names a process cannot carry",
+		func(name, value, message string) {
+			cfg := valid()
+			cfg.LanguageServers[0].Env = map[string]string{name: value}
+
+			err := config.Validate(cfg)
+			Expect(err).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("an empty name", "", "value", "empty env name"),
+		Entry("a name holding =", "A=B", "value", `env name "A=B" contains '='`),
+		Entry("a name holding NUL", "A\x00B", "value", "contains NUL"),
+		Entry("a value holding NUL", "NAME", "a\x00b", "contains NUL"),
+	)
+
 	DescribeTable("rejects unsafe root markers before a server starts",
 		func(markers config.RootMarkers, message string) {
 			cfg := valid()
