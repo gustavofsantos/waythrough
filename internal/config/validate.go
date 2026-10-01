@@ -35,6 +35,9 @@ func Validate(cfg Config) error {
 		if err := entry.RootMarkers.validate(); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", id, err))
 		}
+		if err := validateEnv(entry.Env); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", id, err))
+		}
 		if !validReadiness(entry.Readiness) {
 			errs = append(errs, fmt.Errorf("%s: invalid readiness %q (want %q or %q)",
 				id, entry.Readiness, ReadinessProgress, ReadinessHandshake))
@@ -93,6 +96,27 @@ func (markers RootMarkers) validate() error {
 					return fmt.Errorf("%s contains parent traversal", id)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// validateEnv rejects what a process environment cannot carry: a name that
+// is empty or holds '=', which would split the NAME=value pair at the wrong
+// place, and a NUL anywhere, which ends the C string the kernel reads.
+func validateEnv(env map[string]string) error {
+	for name, value := range env {
+		if name == "" {
+			return errors.New("empty env name")
+		}
+		if strings.Contains(name, "=") {
+			return fmt.Errorf("env name %q contains '='", name)
+		}
+		if strings.ContainsRune(name, 0) {
+			return fmt.Errorf("env name %q contains NUL", name)
+		}
+		if strings.ContainsRune(value, 0) {
+			return fmt.Errorf("env %s value contains NUL", name)
 		}
 	}
 	return nil

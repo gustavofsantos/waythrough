@@ -1942,6 +1942,7 @@ func (p *serverProcess) beginAttempt() (int, bool) {
 // Go allows exactly one.
 func (p *serverProcess) startProcess(ctx context.Context, generation int) error {
 	cmd := exec.CommandContext(ctx, p.entry.Command, p.entry.Args...)
+	cmd.Env = serverEnvironment(os.Environ(), p.entry.Env)
 
 	// A language server explains a bad start on its own stderr, and that is
 	// the one account of it Waythrough can offer. Capturing it costs a
@@ -1993,6 +1994,25 @@ func (p *serverProcess) startProcess(ctx context.Context, generation int) error 
 		stderrLog.flush()
 	}
 	return fmt.Errorf("start %s: %w", p.entry.Command, errShutdownBegan)
+}
+
+// serverEnvironment is the environment a language server starts with: the
+// one Waythrough inherited, then each configured variable in name order. A
+// configured variable wins over an inherited one of the same name, because
+// os/exec keeps the last value it sees for a name.
+func serverEnvironment(inherited []string, configured map[string]string) []string {
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	environment := make([]string, 0, len(inherited)+len(names))
+	environment = append(environment, inherited...)
+	for _, name := range names {
+		environment = append(environment, name+"="+configured[name])
+	}
+	return environment
 }
 
 // errShutdownBegan reports a spawn abandoned because the manager is
