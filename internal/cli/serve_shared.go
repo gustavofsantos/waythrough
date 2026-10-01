@@ -45,7 +45,10 @@ func runSharedServe(
 	}
 
 	deadline := time.Now().Add(daemon.AttachTimeout)
-	session, err := attachToWorkspace(root, runtimeDir, deadline, logger, options)
+	startFor := func(key string, paths daemon.Paths) daemon.StartFunc {
+		return daemonStarter(root, key, paths, options)
+	}
+	session, err := attachToWorkspace(root, runtimeDir, deadline, logger, startFor)
 	if err != nil {
 		return err
 	}
@@ -65,45 +68,53 @@ func runSharedServe(
 	return nil
 }
 
-// attachToWorkspace attaches with the key the configuration names now. A
-// daemon this session started exits at once when the configuration changed
-// after it was read here, so the key is computed again, and the attach
-// retried once, before that is reported as a failure.
+// attachToWorkspace attaches with the key the configuration names now.
+// startFor builds the function that starts a daemon for one key.
+//
+// A daemon refuses to serve when the configuration changed after this
+// session read it, and exits at once. So when a started daemon exits, the
+// key is computed again: a different key gets one more attach, and an
+// unchanged one fails, since its daemon would only exit the same way again.
 func attachToWorkspace(
 	root, runtimeDir string,
 	deadline time.Time,
 	logger *slog.Logger,
-	options sharedOptions,
+	startFor func(key string, paths daemon.Paths) daemon.StartFunc,
 ) (daemon.Session, error) {
 	const keyAttemptsMax = 2
-	var lastKey string
+	key, err := currentWorkspaceKey(root)
+	if err != nil {
+		return daemon.Session{}, err
+	}
 	for attempt := 1; ; attempt++ {
-		key, err := currentWorkspaceKey(root)
-		if err != nil {
-			return daemon.Session{}, err
-		}
 		paths, err := daemon.PathsFor(runtimeDir, key)
 		if err != nil {
 			return daemon.Session{}, err
 		}
 
-		session, err := daemon.Attach(daemon.AttachOptions{
+		session, attachErr := daemon.Attach(daemon.AttachOptions{
 			Paths:    paths,
 			Key:      key,
 			Deadline: deadline,
-			Start:    daemonStarter(root, key, paths, options),
+			Start:    startFor(key, paths),
 		})
-		if err == nil {
+		if attachErr == nil {
 			logger.Debug("attached to shared daemon",
 				slog.String("key", key), slog.String("log", paths.Log))
 			return session, nil
 		}
-		retry := errors.Is(err, daemon.ErrDaemonExited) &&
-			key != lastKey && attempt < keyAttemptsMax
-		if !retry {
-			return daemon.Session{}, fmt.Errorf("attach to shared daemon: %w", err)
+		if !errors.Is(attachErr, daemon.ErrDaemonExited) || attempt == keyAttemptsMax {
+			return daemon.Session{}, fmt.Errorf("attach to shared daemon: %w", attachErr)
 		}
-		lastKey = key
+
+		currentKey, err := currentWorkspaceKey(root)
+		if err != nil {
+			return daemon.Session{}, err
+		}
+		if currentKey == key {
+			return daemon.Session{}, fmt.Errorf("attach to shared daemon: %w", attachErr)
+		}
+		key = currentKey
 	}
 }
 

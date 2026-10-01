@@ -55,7 +55,26 @@ type runningDaemon struct {
 	done   chan struct{}
 }
 
+// blockingServer has one tool that never returns and ignores its context,
+// as a call stuck writing to a language server that stopped reading does.
+func blockingServer() *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{Name: "hang", Version: "0"}, nil)
+	release := make(chan struct{})
+	DeferCleanup(func() { close(release) })
+	mcp.AddTool(server, &mcp.Tool{Name: "hang"}, func(
+		context.Context, *mcp.CallToolRequest, struct{},
+	) (*mcp.CallToolResult, struct{}, error) {
+		<-release
+		return nil, struct{}{}, nil
+	})
+	return server
+}
+
 func startDaemon(options daemon.Options) runningDaemon {
+	return startDaemonServing(echoServer(), options)
+}
+
+func startDaemonServing(server *mcp.Server, options daemon.Options) runningDaemon {
 	socket := shortSocketPath()
 	listener, err := daemon.Listen(socket)
 	Expect(err).NotTo(HaveOccurred())
@@ -66,7 +85,7 @@ func startDaemon(options daemon.Options) runningDaemon {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		daemon.Serve(ctx, listener, echoServer(), options)
+		daemon.Serve(ctx, listener, server, options)
 	}()
 	DeferCleanup(func() {
 		cancel()
@@ -93,6 +112,8 @@ func listen(socket string) net.Listener {
 	return listener
 }
 
+func greetingDeadline() time.Time { return time.Now().Add(daemon.GreetingTimeout) }
+
 func dial(socket string) (net.Conn, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(context.Background(), "unix", socket)
@@ -104,16 +125,24 @@ func dial(socket string) (net.Conn, error) {
 
 // attach dials the daemon, reads its greeting, and opens an MCP session.
 func attach(socket string) *mcp.ClientSession {
+	session, _ := attachConn(socket)
+	return session
+}
+
+// attachConn is attach that also returns the connection, for a spec that
+// leaves the way a killed agent does: by its socket closing, with a call
+// still in flight.
+func attachConn(socket string) (*mcp.ClientSession, net.Conn) {
 	conn, err := dial(socket)
 	Expect(err).NotTo(HaveOccurred())
 	reader := bufio.NewReader(conn)
-	Expect(daemon.ReadGreeting(conn, reader, testKey)).To(Succeed())
+	Expect(daemon.ReadGreeting(conn, reader, testKey, greetingDeadline())).To(Succeed())
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
 	session, err := client.Connect(context.Background(),
 		&mcp.IOTransport{Reader: bufferedReader{reader}, Writer: conn}, nil)
 	Expect(err).NotTo(HaveOccurred())
-	return session
+	return session, conn
 }
 
 func echo(session *mcp.ClientSession, text string) string {
@@ -128,7 +157,7 @@ func echo(session *mcp.ClientSession, text string) string {
 var _ = Describe("Serve", func() {
 	It("serves several sessions at once, and drains after the last one leaves", func() {
 		running := startDaemon(daemon.Options{
-			StartupGrace: 10 * time.Second, Linger: 100 * time.Millisecond,
+			StartupGrace: 200 * time.Millisecond, Linger: 100 * time.Millisecond,
 		})
 
 		first := attach(running.socket)
@@ -155,7 +184,7 @@ var _ = Describe("Serve", func() {
 	})
 
 	It("lets the spawning client attach even when the linger is zero", func() {
-		running := startDaemon(daemon.Options{StartupGrace: 10 * time.Second, Linger: 0})
+		running := startDaemon(daemon.Options{StartupGrace: time.Second, Linger: 0})
 		Consistently(running.done, 200*time.Millisecond).ShouldNot(BeClosed())
 
 		session := attach(running.socket)
@@ -164,9 +193,28 @@ var _ = Describe("Serve", func() {
 		Eventually(running.done, 5*time.Second).Should(BeClosed())
 	})
 
+	// A tool call blocked on a hung language server ignores its context, so
+	// its session's Wait never returns. The client has left all the same,
+	// and must stop counting, or the daemon would never drain.
+	It("uncounts a departed session even while one of its calls hangs", func() {
+		running := startDaemonServing(blockingServer(), daemon.Options{
+			StartupGrace: 200 * time.Millisecond, Linger: 0,
+		})
+		session, conn := attachConn(running.socket)
+		go func() {
+			_, _ = session.CallTool(context.Background(), &mcp.CallToolParams{
+				Name: "hang", Arguments: map[string]any{},
+			})
+		}()
+		time.Sleep(100 * time.Millisecond)
+		Expect(conn.Close()).To(Succeed())
+
+		Eventually(running.done, 20*time.Second).Should(BeClosed())
+	})
+
 	It("keeps serving when a session arrives within the linger", func() {
 		running := startDaemon(daemon.Options{
-			StartupGrace: 10 * time.Second, Linger: 300 * time.Millisecond,
+			StartupGrace: 100 * time.Millisecond, Linger: 300 * time.Millisecond,
 		})
 		Expect(attach(running.socket).Close()).To(Succeed())
 
@@ -181,7 +229,7 @@ var _ = Describe("Serve", func() {
 
 	It("uncounts a client that leaves before reading its greeting", func() {
 		running := startDaemon(daemon.Options{
-			StartupGrace: 10 * time.Second, Linger: 50 * time.Millisecond,
+			StartupGrace: 200 * time.Millisecond, Linger: 50 * time.Millisecond,
 		})
 		conn, err := dial(running.socket)
 		Expect(err).NotTo(HaveOccurred())
@@ -197,13 +245,14 @@ var _ = Describe("Serve", func() {
 			conn, err := dial(running.socket)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(conn.Close)
-			Expect(daemon.ReadGreeting(conn, bufio.NewReader(conn), testKey)).To(Succeed())
+			reader := bufio.NewReader(conn)
+			Expect(daemon.ReadGreeting(conn, reader, testKey, greetingDeadline())).To(Succeed())
 		}
 
 		conn, err := dial(running.socket)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(conn.Close)
-		err = daemon.ReadGreeting(conn, bufio.NewReader(conn), testKey)
+		err = daemon.ReadGreeting(conn, bufio.NewReader(conn), testKey, greetingDeadline())
 		Expect(err).To(MatchError(daemon.ErrBusy))
 	})
 
@@ -242,7 +291,7 @@ var _ = Describe("ReadGreeting", func() {
 		conn, err := dial(listener.Addr().String())
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(conn.Close)
-		return daemon.ReadGreeting(conn, bufio.NewReader(conn), testKey)
+		return daemon.ReadGreeting(conn, bufio.NewReader(conn), testKey, greetingDeadline())
 	}
 
 	It("accepts the greeting for its own key", func() {

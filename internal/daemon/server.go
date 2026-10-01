@@ -29,8 +29,10 @@ type Options struct {
 	// Key is the workspace key every greeting names.
 	Key string
 	// StartupGrace is how long the daemon waits for its first session. It
-	// lasts until the spawning client's attach deadline, so that client
-	// always has time to attach, whatever Linger is.
+	// lasts until the spawning client's attach deadline. Another client can
+	// still attach and leave first, and a short Linger can then drain the
+	// daemon before the spawning client dials; Attach starts another daemon
+	// when that happens.
 	StartupGrace time.Duration
 	// Linger is how long the daemon keeps its servers after the last
 	// session ends. Zero drains at once.
@@ -162,12 +164,67 @@ func serveSession(
 		options.Logger.Debug("daemon greeting failed", slog.String("error", err.Error()))
 		return
 	}
-	session, err := server.Connect(ctx, &mcp.IOTransport{Reader: conn, Writer: conn}, nil)
+	reader := &endSignalingReader{conn: conn, ended: make(chan struct{})}
+	session, err := server.Connect(ctx, &mcp.IOTransport{Reader: reader, Writer: conn}, nil)
 	if err != nil {
 		options.Logger.Warn("daemon session failed to connect", slog.String("error", err.Error()))
 		return
 	}
-	_ = session.Wait()
+	awaitDeparture(session, reader.ended, options.Logger)
+}
+
+// awaitDeparture returns when the session ends, or sessionCloseGrace after
+// its client stopped sending, whichever is first.
+//
+// A session's Wait returns only once every call it is handling has. A call
+// stuck writing to a language server that stopped reading ignores its
+// context, so its Wait would never return, and its count would keep the
+// daemon and every server alive with no client left. Once the client has
+// left and the grace has passed, the session is uncounted anyway. The stuck
+// call ends when the drain stops the server it is writing to.
+func awaitDeparture(session *mcp.ServerSession, clientEnded <-chan struct{}, logger *slog.Logger) {
+	sessionEnded := make(chan struct{})
+	go func() {
+		_ = session.Wait()
+		close(sessionEnded)
+	}()
+
+	select {
+	case <-sessionEnded:
+		return
+	case <-clientEnded:
+	}
+	select {
+	case <-sessionEnded:
+	case <-time.After(sessionCloseGrace):
+		logger.Warn("daemon session left with a call still running",
+			slog.Duration("grace", sessionCloseGrace))
+	}
+}
+
+// endSignalingReader closes ended when the first read from conn fails,
+// which is how the daemon learns its client left: EOF when the client
+// closed, or an error when the connection broke.
+type endSignalingReader struct {
+	conn  *net.UnixConn
+	ended chan struct{}
+	once  sync.Once
+}
+
+func (r *endSignalingReader) Read(buffer []byte) (int, error) {
+	count, err := r.conn.Read(buffer)
+	if err != nil {
+		r.once.Do(func() { close(r.ended) })
+		return count, fmt.Errorf("read session: %w", err)
+	}
+	return count, nil
+}
+
+func (r *endSignalingReader) Close() error {
+	if err := r.conn.Close(); err != nil {
+		return fmt.Errorf("close session: %w", err)
+	}
+	return nil
 }
 
 func waitWithGrace(group *sync.WaitGroup, grace time.Duration, logger *slog.Logger) {

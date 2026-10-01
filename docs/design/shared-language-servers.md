@@ -313,7 +313,8 @@ one agent from stopping servers that other agents use.
 | Servers stop only when no session is connected. | Drain requires `count == 0` and a current timer generation, both checked under the registry lock. |
 | The lock is held for the daemon's whole life. | The lock file stays referenced by the daemon value and is never closed. It is opened `O_CLOEXEC` and never passed to a child. |
 | Only the same user can connect. | Peer uid check on both ends of each connection, plus the runtime directory checks (owner, mode, not a symlink) and socket mode `0600`. |
-| The spawning client always has time to attach. | The startup grace lasts until the attach deadline, whatever the linger is. |
+| The spawning client attaches if any daemon can be had before its deadline. | The startup grace lasts until the attach deadline. A daemon that drains before its spawner dials exits cleanly, and the spawner then starts another one. |
+| A departed client never stays counted. | A session is uncounted at most 5 s after its client's end of the socket closes, even while one of its calls is stuck on a hung server. |
 | A daemon never runs with a configuration other than the one its key names. | The daemon computes the key again. |
 
 ### Bounds
@@ -323,7 +324,7 @@ one agent from stopping servers that other agents use.
 | Sessions per daemon | 64. Beyond that, the daemon refuses with an explicit error line. |
 | Attach time | 30 s, one deadline for every attach step |
 | Daemon lock wait | Until the client's attach deadline |
-| Greeting | 64 bytes, 5 s read deadline |
+| Greeting | 64 bytes, 5 s read deadline, never past the attach deadline |
 | Drain | About 16 s. The 10 s `shutdown` context and the 5 s kill grace run in parallel across servers, plus the reap. |
 | Startup grace | Until the attach deadline |
 | Linger | Default 60 s, configurable (see Q2) |

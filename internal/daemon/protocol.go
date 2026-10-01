@@ -36,10 +36,15 @@ var ErrNoGreeting = errors.New("daemon closed the connection before greeting")
 func greetingLine(key string) string { return greetingPrefix + key + "\n" }
 
 // ReadGreeting reads the daemon's first line from reader and checks that it
-// greets this key. reader must be the only reader of conn from here on,
-// because it may already hold MCP bytes that follow the greeting.
-func ReadGreeting(conn net.Conn, reader *bufio.Reader, key string) error {
-	if err := conn.SetReadDeadline(time.Now().Add(GreetingTimeout)); err != nil {
+// greets this key. It waits GreetingTimeout at most, and never past
+// deadline. reader must be the only reader of conn from here on, because it
+// may already hold MCP bytes that follow the greeting.
+func ReadGreeting(conn net.Conn, reader *bufio.Reader, key string, deadline time.Time) error {
+	readDeadline := time.Now().Add(GreetingTimeout)
+	if deadline.Before(readDeadline) {
+		readDeadline = deadline
+	}
+	if err := conn.SetReadDeadline(readDeadline); err != nil {
 		return fmt.Errorf("set greeting deadline: %w", err)
 	}
 	line, err := readLine(reader)

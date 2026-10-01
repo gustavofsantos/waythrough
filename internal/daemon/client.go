@@ -73,23 +73,32 @@ func Attach(options AttachOptions) (Session, error) {
 		if err == nil || !retryable(err) {
 			return session, err
 		}
+		// Checked before a start, because a daemon started after the
+		// deadline could never be attached to, and it would truncate the
+		// log that explains why the last one failed.
+		remaining := time.Until(options.Deadline)
+		if remaining <= 0 {
+			return Session{}, fmt.Errorf(
+				"no daemon accepted the session before the attach deadline; see %s",
+				options.Paths.Log)
+		}
 		if exited == nil {
 			exited, err = options.Start(options.Deadline)
 			if err != nil {
 				return Session{}, fmt.Errorf("start daemon: %w", err)
 			}
 		}
-
-		remaining := time.Until(options.Deadline)
-		if remaining <= 0 {
-			return Session{}, fmt.Errorf(
-				"no daemon accepted the session within %s; see %s",
-				AttachTimeout, options.Paths.Log)
-		}
 		select {
 		case exitErr := <-exited:
-			return Session{}, fmt.Errorf("%w (%v); see %s",
-				ErrDaemonExited, exitErr, options.Paths.Log)
+			if exitErr != nil {
+				return Session{}, fmt.Errorf("%w (%v); see %s",
+					ErrDaemonExited, exitErr, options.Paths.Log)
+			}
+			// A clean exit is a drain: another client attached and left
+			// before this one dialed, and a short linger ran out. Starting
+			// another daemon is the remedy, and the deadline bounds how
+			// often that can repeat.
+			exited = nil
 		case <-time.After(min(wait, remaining)):
 		}
 		wait = min(2*wait, dialPollMax)
@@ -127,7 +136,7 @@ func attachOnce(options AttachOptions) (Session, error) {
 		return Session{}, err
 	}
 	reader := bufio.NewReader(unixConn)
-	if err := ReadGreeting(unixConn, reader, options.Key); err != nil {
+	if err := ReadGreeting(unixConn, reader, options.Key, options.Deadline); err != nil {
 		_ = conn.Close()
 		if errors.Is(err, os.ErrDeadlineExceeded) {
 			return Session{}, fmt.Errorf("daemon pid %d did not greet within %s; see %s: %w",

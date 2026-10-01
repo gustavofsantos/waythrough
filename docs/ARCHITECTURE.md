@@ -210,10 +210,21 @@ stateDiagram-v2
 ```
 
 The startup grace lasts until the attach deadline of the session that
-started the daemon. That session therefore always has time to attach,
-even with `--linger=0s`. The decrement for each session is registered
-before any step that can fail. A client that leaves before its greeting
-therefore cannot leave a count that keeps the daemon alive.
+started the daemon. Another session can attach and leave before that
+session dials, and a short linger can then drain the daemon. A daemon
+that drains exits cleanly, and every failure exits with an error. A
+clean exit therefore tells the session that started the daemon to start
+another one, and its deadline bounds how often that can happen.
+
+A session counts as gone when its client's end of the socket closes. If
+a call is stuck writing to a language server that stopped reading, the
+daemon still uncounts the session five seconds later. Otherwise one
+stuck call would keep every server running with no client left. The
+stuck call ends when the drain stops that server.
+
+The decrement for each session is registered before any step that can
+fail. A client that leaves before its greeting therefore cannot leave a
+count that keeps the daemon alive.
 
 Two changes keep shared state safe:
 
