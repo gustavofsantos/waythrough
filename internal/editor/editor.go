@@ -72,7 +72,8 @@ func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Serv
 		Name: "restart_server",
 		Description: "Restart one language server by name, and wait until its " +
 			"replacement can answer. Use it when a server's answers no longer " +
-			"match the code on disk. Every other language server keeps running. " +
+			"match the code on disk. The server restarts for every project root " +
+			"it serves. Every other language server keeps running. " +
 			"Every session sharing this server sees the restart too.",
 	}, e.restartServer)
 
