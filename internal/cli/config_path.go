@@ -23,18 +23,35 @@ func userConfigPath() (string, error) {
 }
 
 func loadUserConfig() (config.Config, string, error) {
+	loaded, err := readUserConfig()
+	return loaded.config, loaded.path, err
+}
+
+// userConfig is the user configuration together with the exact bytes it
+// was parsed from, which a shared daemon's key hashes.
+type userConfig struct {
+	config config.Config
+	path   string
+	data   []byte
+}
+
+func readUserConfig() (userConfig, error) {
 	path, err := userConfigPath()
 	if err != nil {
-		return config.Config{}, "", err
+		return userConfig{}, err
 	}
 
-	cfg, err := config.Load(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return config.Config{}, path, fmt.Errorf(
+			return userConfig{path: path}, fmt.Errorf(
 				"user configuration %s is missing; run waythrough init: %w", path, err)
 		}
-		return config.Config{}, path, err
+		return userConfig{path: path}, fmt.Errorf("read %s: %w", path, err)
 	}
-	return cfg, path, nil
+	cfg, err := config.Parse(data, path)
+	if err != nil {
+		return userConfig{path: path}, err
+	}
+	return userConfig{config: cfg, path: path, data: data}, nil
 }
