@@ -1,6 +1,14 @@
 # Design: shared language servers across agent sessions
 
-Status: **proposal, awaiting review**. No code has changed yet.
+Status: **approved and implemented** behind `serve --shared`, with the
+recommended answer to each open question below. `docs/ARCHITECTURE.md`
+describes the implementation, and `README.md` describes how to use it.
+
+The implementation differs from this proposal in one place. The daemon
+has no special exit code for a key that changed. Instead, a client whose
+started daemon exits early computes the key again, and if the key has
+changed it attaches once more. The client therefore needs no exit-code
+contract with the daemon.
 
 ## Problem
 
@@ -188,8 +196,8 @@ sequenceDiagram
   | Dial fails, or EOF or a reset before the greeting (no daemon, or one draining) | Take the spawn lock, then dial again. Start a daemon if the dial still fails. |
   | `busy` line (session limit reached) | Fail at once with that message. Do not retry. |
   | Greeting read times out (daemon alive but hung) | Fail with an error that names the daemon's pid, read from `<key>.lock`, and `<key>.log`. |
-  | The started daemon exits with the "key changed" exit code | Reload the configuration, compute the key again, and retry once. |
-  | The started daemon exits with any other code | Fail and name `<key>.log`. |
+  | The started daemon exits early, and the key computed again differs | Attach once more with the new key. |
+  | The started daemon exits early, and the key is unchanged | Fail and name `<key>.log`. |
 - Both sides check the peer's credentials on the accepted socket:
   `SO_PEERCRED` on Linux and `getpeereid` on macOS. Each side refuses a
   peer whose uid is not its own. The directory check guards the path,
