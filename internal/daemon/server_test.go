@@ -217,14 +217,26 @@ var _ = Describe("Serve", func() {
 })
 
 var _ = Describe("ReadGreeting", func() {
+	// exchange plays a daemon over a real Unix socket, as production uses:
+	// it says daemonSays, then closes its end, which a draining daemon does
+	// without saying anything at all.
 	exchange := func(daemonSays string) error {
-		client, server := net.Pipe()
-		DeferCleanup(client.Close)
+		listener, err := net.Listen("unix", shortSocketPath())
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(listener.Close)
 		go func() {
-			_, _ = io.WriteString(server, daemonSays)
-			_ = server.Close()
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = io.WriteString(conn, daemonSays)
+			_ = conn.Close()
 		}()
-		return daemon.ReadGreeting(client, bufio.NewReader(client), testKey)
+
+		conn, err := dial(listener.Addr().String())
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(conn.Close)
+		return daemon.ReadGreeting(conn, bufio.NewReader(conn), testKey)
 	}
 
 	It("accepts the greeting for its own key", func() {

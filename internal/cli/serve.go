@@ -30,8 +30,24 @@ func newServeCommand() *cobra.Command {
 	}
 
 	debug := debugFlag(cmd)
+	shared := cmd.Flags().Bool("shared", false,
+		"share language servers with every other --shared session in this "+
+			"workspace, through a daemon started on demand")
+	linger := cmd.Flags().Duration("linger", defaultLinger,
+		"with --shared, how long the daemon this session starts keeps its "+
+			"language servers after the last session leaves")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		return runServe(newLogger(cmd.ErrOrStderr(), *debug))
+		logger := newLogger(cmd.ErrOrStderr(), *debug)
+		if !*shared {
+			return runServe(logger)
+		}
+		if *linger < 0 || *linger > maxLinger {
+			return fmt.Errorf("--linger must be between 0 and %s, got %s", maxLinger, *linger)
+		}
+		return runSharedServe(cmd.InOrStdin(), cmd.OutOrStdout(), logger, sharedOptions{
+			linger: *linger,
+			debug:  *debug,
+		})
 	}
 
 	return cmd
