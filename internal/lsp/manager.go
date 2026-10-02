@@ -669,6 +669,48 @@ func (m *Manager) WaitReady(ctx context.Context, name string, timeout time.Durat
 	return m.waitReady(ctx, proc, timeout, 0)
 }
 
+// Prestart starts the instance of the named server that serves the
+// Manager's root, and returns without waiting for it to become ready. A
+// server that takes long to index can then do so before the first request
+// needs it, rather than inside that request. It starts the same supervisor
+// a request at the root would, so a later request waits on it rather than
+// starting another.
+//
+// It starts nothing, and returns false, for a server with root markers when
+// none of them matches from the root. Such a workspace holds no project of
+// that server's at its root, maybe several below it. A process at the root
+// would contain every one of them, and requests from each would reach it
+// rather than a process at their own marker root, as they do on demand.
+//
+// Precondition: Start was called. Before it there is no lifetime to start a
+// process on, and the server would stay cold in silence.
+func (m *Manager) Prestart(ctx context.Context, name string) (bool, error) {
+	m.mu.Lock()
+	started := m.lifetimeCtx != nil
+	m.mu.Unlock()
+	if !started {
+		panic("lsp: Prestart called before Start")
+	}
+
+	server, err := m.configuredNamed(name)
+	if err != nil {
+		return false, err
+	}
+	if len(server.entry.RootMarkers) > 0 {
+		route, err := routeFor(ctx, m.root, server.entry.RootMarkers)
+		if err != nil {
+			return false, err
+		}
+		if route.markerRoot == "" {
+			return false, nil
+		}
+	}
+	if _, err := m.ensureSupervisor(ctx, name, m.root); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Restart stops every running instance of the named server, one per
 // workspace root, and returns once each replacement has passed its own
 // readiness gate. A stale index is as likely in one worktree as in another,

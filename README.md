@@ -67,9 +67,11 @@ A typical AI-pairing coding day uses the boundary like this:
    developer for the next decision.
 
 Configured language servers start on demand, so a normal session pays for
-the language tooling it actually uses. Waythrough reads one configuration
-file, `~/.waythrough.yaml`, so the same setup follows you across shared
-repositories without adding a repository-owned file.
+the language tooling it actually uses. Name the servers a workspace needs
+with `serve --eager` to start them before the first tool call instead.
+Waythrough reads one configuration file, `~/.waythrough.yaml`, so the same
+setup follows you across shared repositories without adding a
+repository-owned file.
 
 ## Status
 
@@ -253,10 +255,11 @@ target to list the rest, or see
    A file outside the workspace fails with an error, so that a server never
    answers for code it did not index.
 
-   Every configured entry starts on demand, and one entry can run several
-   processes, one for each project root. This lets one session work across
-   several git worktrees, even with the MCP server in your global agent
-   configuration. Waythrough picks the process for each file in this order:
+   Every configured entry starts on demand, unless `serve --eager` names
+   it (see [below](#start-language-servers-before-the-first-tool-call)).
+   One entry can run several processes, one for each project root. This
+   lets one session work across several git worktrees, even with the MCP
+   server in your global agent configuration. Waythrough picks the process for each file in this order:
 
    1. The process that already runs at the file's marker root.
    2. A process whose root contains the file, in the same git checkout. A
@@ -311,6 +314,42 @@ Code names the tools after the server.
 The plugin and the instructions block steer the agent in the same way,
 so you need only one of them. A spec checks that the skill names exactly
 the tools the server registers.
+
+## Start language servers before the first tool call
+
+Some language servers take a long time to start and index. By default,
+the first tool call that needs a server waits for that. When you know
+which servers a workspace uses, name them with `--eager`, and `serve`
+starts them at once, for the workspace root, while the agent gets going:
+
+```json
+{
+  "mcpServers": {
+    "waythrough": {
+      "command": "waythrough",
+      "args": ["serve", "--eager=gopls"]
+    }
+  }
+}
+```
+
+Give several names separated by commas, or repeat the flag. Each name
+must be the `name` of an entry in `~/.waythrough.yaml`; an unknown name
+stops `serve` with an error. `serve` does not wait for the servers to be
+ready, so the agent connects as fast as before. A server that fails to
+start is reported by `get_status`, as on demand.
+
+Name only the servers the workspace needs. Every server you name indexes
+the workspace root, whether or not a tool call ever reaches it. A server
+with `root_markers` starts eagerly only when one of its markers matches
+from the workspace root. When none does, for example in a workspace whose
+projects all sit in subdirectories, it starts on demand as usual. Then
+each project gets its own process, rather than one at the root that
+contains them all. With `--debug`, `serve` logs each server it skips.
+
+With `--shared`, `--eager` applies to the daemon that the session starts,
+as `--linger` does. A session that connects to a running daemon does not
+change it.
 
 ## Share language servers across sessions
 

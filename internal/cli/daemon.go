@@ -16,7 +16,6 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/daemon"
 	"github.com/gustavofsantos/waythrough/internal/editor"
-	"github.com/gustavofsantos/waythrough/internal/lsp"
 	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
@@ -27,6 +26,7 @@ type daemonOptions struct {
 	attachDeadline time.Time
 	linger         time.Duration
 	debug          bool
+	eager          []string
 }
 
 // newDaemonCommand is the hidden command `serve --shared` starts. Users
@@ -49,6 +49,10 @@ func newDaemonCommand() *cobra.Command {
 	cmd.Flags().DurationVar(&options.linger, "linger", defaultLinger,
 		"how long to keep the language servers after the last session leaves")
 	cmd.Flags().BoolVar(&options.debug, "debug", false, "log at debug level")
+	// An array, not a slice, so that each name arrives exactly as the
+	// session passed it, with no CSV parsing in between.
+	cmd.Flags().StringArrayVar(&options.eager, "eager", nil,
+		"a language server to start at once for the workspace root; repeatable")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		deadline, err := time.Parse(time.RFC3339Nano, attachDeadline)
 		if err != nil {
@@ -108,9 +112,8 @@ func runDaemon(stderr io.Writer, options daemonOptions) error {
 		return err
 	}
 
-	manager := lsp.NewManager(options.root, cfg.LanguageServers,
-		lsp.WithLogger(logger), lsp.WithDemandStart())
-	if err := manager.Start(context.Background()); err != nil {
+	manager, err := startManager(options.root, cfg, logger, options.eager)
+	if err != nil {
 		_ = listener.Close()
 		_ = statusListener.Close()
 		return err
@@ -140,9 +143,7 @@ func runDaemon(stderr io.Writer, options daemonOptions) error {
 	// sees the sessions it shares its servers with.
 	running.Serve(ctx, editor.New(manager, cfg, logger, running.Report))
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancel()
-	_ = manager.Shutdown(shutdownCtx)
+	_ = shutdownManager(manager)
 	logger.Debug("waythrough daemon stopped")
 	return nil
 }
@@ -167,6 +168,9 @@ func daemonConfig(options daemonOptions) (config.Config, error) {
 		return config.Config{}, fmt.Errorf(
 			"workspace key changed from %s to %s since the session started this daemon",
 			options.key, key)
+	}
+	if err := validateEager(loaded.config, options.eager); err != nil {
+		return config.Config{}, err
 	}
 	return loaded.config, nil
 }
