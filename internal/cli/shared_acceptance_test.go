@@ -80,14 +80,13 @@ type agentSession struct {
 }
 
 func (w sharedWorkspace) startSession(linger time.Duration) agentSession {
-	command := exec.CommandContext(context.Background(), waythroughPath,
-		"serve", "--shared", "--linger="+linger.String())
-	command.Dir = w.root
-	command.Env = []string{
-		"HOME=" + w.home,
-		"XDG_RUNTIME_DIR=" + w.runtimeDir,
-		"PATH=" + os.Getenv("PATH"),
-	}
+	return w.startServe("--shared", "--linger="+linger.String())
+}
+
+// startServe runs `waythrough serve` with serveArgs as an agent would, and
+// connects to it.
+func (w sharedWorkspace) startServe(serveArgs ...string) agentSession {
+	command := w.serveCommand(serveArgs...)
 	command.Stderr = GinkgoWriter
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "agent", Version: "0"}, nil)
@@ -96,6 +95,20 @@ func (w sharedWorkspace) startSession(linger time.Duration) agentSession {
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func() { _ = session.Close() })
 	return agentSession{command: command, session: session}
+}
+
+// serveCommand is `waythrough serve` with serveArgs, in the workspace and
+// with this user's environment, not yet started.
+func (w sharedWorkspace) serveCommand(serveArgs ...string) *exec.Cmd {
+	command := exec.CommandContext(context.Background(), waythroughPath,
+		append([]string{"serve"}, serveArgs...)...)
+	command.Dir = w.root
+	command.Env = []string{
+		"HOME=" + w.home,
+		"XDG_RUNTIME_DIR=" + w.runtimeDir,
+		"PATH=" + os.Getenv("PATH"),
+	}
+	return command
 }
 
 // definitionLine asks for the definition at the start of the workspace file

@@ -155,6 +155,79 @@ var _ = Describe("Manager", func() {
 		})
 	})
 
+	When("a demand-started server is prestarted", func() {
+		It("starts it without a request, and a later request reuses its process", func() {
+			prestartedLog := filepath.Join(GinkgoT().TempDir(), "prestarted.log")
+			unusedLog := filepath.Join(GinkgoT().TempDir(), "unused.log")
+
+			prestarted := fakeEntry("-instance-log=" + prestartedLog)
+			unused := fakeEntry("-instance-log=" + unusedLog)
+			unused.Name = "unused"
+			unused.Filetypes = map[string]string{".unused": "unused"}
+
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{prestarted, unused}, lsp.WithDemandStart())
+			Expect(manager.Start(ctx)).To(Succeed())
+			Expect(manager.Prestart(ctx, "fake")).To(BeTrue())
+
+			Eventually(func() (lsp.Status, error) { return manager.Status("fake") },
+				2*time.Second).Should(Equal(lsp.StatusReady))
+			Expect(manager.WaitReady(ctx, "fake", 2*time.Second)).To(Succeed())
+			Expect(logLines(prestartedLog)).To(HaveLen(1),
+				"a request after a prestart must reach the prestarted process")
+			Expect(manager.Status("unused")).To(Equal(lsp.StatusIdle))
+		})
+
+		It("starts a server whose root marker matches at the workspace root", func() {
+			workspace := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(workspace, "project.marker"), nil, 0o644)).
+				To(Succeed())
+			entry := fakeEntry()
+			entry.RootMarkers = config.RootMarkers{{"project.marker"}}
+
+			manager := lsp.NewManager(workspace,
+				[]config.LanguageServer{entry}, lsp.WithDemandStart())
+			Expect(manager.Start(ctx)).To(Succeed())
+
+			Expect(manager.Prestart(ctx, "fake")).To(BeTrue())
+			Eventually(func() (lsp.Status, error) { return manager.Status("fake") },
+				2*time.Second).Should(Equal(lsp.StatusReady))
+		})
+
+		// A process at the root would contain both projects below it, and
+		// take their requests from the processes their markers name.
+		It("skips a server whose root markers match only below the workspace root", func() {
+			workspace := GinkgoT().TempDir()
+			for _, project := range []string{"a", "b"} {
+				directory := filepath.Join(workspace, project)
+				Expect(os.MkdirAll(directory, 0o755)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(directory, "project.marker"), nil, 0o644)).
+					To(Succeed())
+			}
+			instanceLog := filepath.Join(GinkgoT().TempDir(), "instances.log")
+			entry := fakeEntry("-instance-log=" + instanceLog)
+			entry.RootMarkers = config.RootMarkers{{"project.marker"}}
+
+			manager := lsp.NewManager(workspace,
+				[]config.LanguageServer{entry}, lsp.WithDemandStart())
+			Expect(manager.Start(ctx)).To(Succeed())
+
+			Expect(manager.Prestart(ctx, "fake")).To(BeFalse())
+			Expect(manager.Status("fake")).To(Equal(lsp.StatusIdle))
+			_, err := os.Stat(instanceLog)
+			Expect(os.IsNotExist(err)).To(BeTrue(), "a skipped server must not start")
+		})
+
+		It("refuses a name no entry has", func() {
+			manager := lsp.NewManager(GinkgoT().TempDir(),
+				[]config.LanguageServer{fakeEntry()}, lsp.WithDemandStart())
+			Expect(manager.Start(ctx)).To(Succeed())
+
+			_, err := manager.Prestart(ctx, "missing")
+			Expect(err).To(MatchError(ContainSubstring(`"missing"`)))
+		})
+	})
+
 	When("a language server reports workDoneProgress for its startup work", func() {
 		It("blocks WaitReady until the progress token closes, then returns", func() {
 			entry := indexingFakeEntry("-progress", "-progress-delay=100ms")

@@ -27,6 +27,9 @@ const (
 type sharedOptions struct {
 	linger time.Duration
 	debug  bool
+	// eager names the servers the daemon this session starts prestarts. A
+	// daemon that already runs keeps the startup it was given.
+	eager []string
 }
 
 // runSharedServe attaches this agent session to the workspace's daemon,
@@ -38,6 +41,9 @@ func runSharedServe(
 	root, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolve workspace root: %w", err)
+	}
+	if err := checkEagerNames(options.eager); err != nil {
+		return err
 	}
 	runtimeDir, err := daemon.RuntimeDir()
 	if err != nil {
@@ -132,6 +138,20 @@ func currentWorkspaceKey(root string) (string, error) {
 	return workspaceKey(root, loaded.data)
 }
 
+// checkEagerNames fails a misspelled --eager name here, on the agent's
+// stderr, rather than only in the log of a daemon that refused to start. The
+// daemon checks again against the configuration it reads itself.
+func checkEagerNames(eager []string) error {
+	if len(eager) == 0 {
+		return nil
+	}
+	loaded, err := readUserConfig()
+	if err != nil {
+		return err
+	}
+	return validateEager(loaded.config, eager)
+}
+
 // daemonStarter starts `waythrough daemon` for one key, detached from this
 // session: in a new session of its own, so the agent's Ctrl-C or hangup
 // never reaches servers other sessions use, with stdin and stdout on
@@ -161,6 +181,11 @@ func daemonStarter(root, key string, paths daemon.Paths, options sharedOptions) 
 		}
 		if options.debug {
 			args = append(args, "--debug")
+		}
+		// One flag per name, which the daemon reads as a string array, so
+		// each name arrives as given rather than through a join and a split.
+		for _, name := range options.eager {
+			args = append(args, "--eager="+name)
 		}
 		// The background context is deliberate: the daemon outlives this
 		// session, so nothing this session owns may cancel it.
