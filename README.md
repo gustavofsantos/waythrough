@@ -342,6 +342,50 @@ same gap.
 
 `--shared` works on Linux and macOS.
 
+### Check on running daemons
+
+Run `waythrough status` from any directory to see every daemon that runs
+for your user:
+
+```text
+/home/me/project  [healthy]
+  daemon    pid 31774, waythrough v0.2.0, up 2h14m, serving
+  sessions  2 active of 64, 9 since start, 0 refused
+  runtime   31 goroutines, 2.4 MiB heap, 18.1 MiB total
+  log       /run/user/1000/waythrough/d379a940b7f939082ae3fa5615750141.log
+
+  SERVER  ROOT  STATUS  HEALTH   PID    UP     STARTUP  RSS      DOCS  REQUESTS  FAILED  RECENT FAILED  P50   P95    MAX   CRASHES
+  gopls   .     ready   healthy  31785  2h13m  6.1s     812 MiB  14    1520      3       0/64           38ms  310ms  1.2s  0/3
+```
+
+For each daemon, the report shows its workspace, its state, and its
+sessions. For each language server, it shows the root the server
+indexes, its process and resident memory, how long it took to become
+ready, and the files it has open. It also shows the requests the server
+served and how many failed. The recent figures cover the last 64
+requests, so they show a server that worked for hours and fails now.
+CRASHES shows the exits in the last minute against the restart limit.
+A server that is not used yet shows as `idle`. Resident memory shows
+only on Linux.
+
+Each daemon and each server gets one health word:
+
+- `healthy`: nothing below applies.
+- `degraded`: the server crashed in the last minute, or it is still
+  starting after 30 seconds, or at least one in four of its recent
+  requests failed. A daemon at its session limit is also degraded.
+- `failing`: the server crashed more often than the restart limit
+  allows, and it answers nothing until `restart_server` restarts it.
+
+A daemon is as healthy as its least healthy server. The last error of
+each server shows under the table.
+
+`waythrough status --json` prints the same reports as JSON, for a
+script or a dashboard. Read the status as often as you like: it never
+counts as a session, so it never keeps an idle daemon running. A daemon
+that was killed shows as stale until the next session in its workspace
+replaces it.
+
 ## Tools
 
 Waythrough exposes these MCP tools to a connected coding agent:

@@ -101,11 +101,17 @@ func runDaemon(stderr io.Writer, options daemonOptions) error {
 	if err != nil {
 		return err
 	}
+	statusListener, err := daemon.Listen(paths.Status)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
 
 	manager := lsp.NewManager(options.root, cfg.LanguageServers,
 		lsp.WithLogger(logger), lsp.WithDemandStart())
 	if err := manager.Start(context.Background()); err != nil {
 		_ = listener.Close()
+		_ = statusListener.Close()
 		return err
 	}
 
@@ -122,6 +128,11 @@ func runDaemon(stderr io.Writer, options daemonOptions) error {
 		StartupGrace: time.Until(options.attachDeadline),
 		Linger:       options.linger,
 		Logger:       logger,
+
+		StatusListener:  statusListener,
+		Root:            options.root,
+		Version:         version,
+		LanguageServers: manager.Stats,
 	})
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)

@@ -3,6 +3,7 @@ package daemon_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -50,7 +51,7 @@ var _ = Describe("Key", func() {
 })
 
 var _ = Describe("PathsFor", func() {
-	It("names one socket, lock, spawn lock, and log per key", func() {
+	It("names one socket, lock, spawn lock, log, and status socket per key", func() {
 		paths, err := daemon.PathsFor("/run/user/1000/waythrough", "0123abcd")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(paths).To(Equal(daemon.Paths{
@@ -58,7 +59,24 @@ var _ = Describe("PathsFor", func() {
 			Lock:   "/run/user/1000/waythrough/0123abcd.lock",
 			Spawn:  "/run/user/1000/waythrough/0123abcd.spawn",
 			Log:    "/run/user/1000/waythrough/0123abcd.log",
+			Status: "/run/user/1000/waythrough/0123abcd.status",
 		}))
+	})
+
+	// The status socket's name is two bytes longer than the session
+	// socket's, so a directory exactly long enough for the session socket
+	// must still be refused: the daemon could not listen for status there.
+	It("refuses a directory where the session socket fits but the status socket does not", func() {
+		maxBytes := 107
+		if runtime.GOOS != "linux" {
+			maxBytes = 103
+		}
+		key := strings.Repeat("k", 32)
+		dirBytes := maxBytes - len("/"+key+".sock")
+		dir := "/" + strings.Repeat("d", dirBytes-1)
+
+		_, err := daemon.PathsFor(dir, key)
+		Expect(err).To(MatchError(ContainSubstring(".status")))
 	})
 
 	It("refuses a socket path that does not fit in sun_path", func() {

@@ -3,7 +3,6 @@ package lsp
 import (
 	"bytes"
 	"log/slog"
-	"unicode/utf8"
 )
 
 // serverLogLineBytesMax bounds both what one log record carries of a
@@ -110,17 +109,7 @@ func (l *serverLog) emit(line []byte, truncated bool) {
 // chooses the length of its own replies.
 const errorTextBytesMax = 1024
 
-// truncateForLog caps text at errorTextBytesMax, cutting on a rune boundary
-// so the record stays valid UTF-8, and says that it cut rather than leaving
-// a reader to mistake the cut for the whole message.
+// truncateForLog caps text at errorTextBytesMax: see truncateText.
 func truncateForLog(text string) string {
-	if len(text) <= errorTextBytesMax {
-		return text
-	}
-
-	cut := errorTextBytesMax
-	for cut > 0 && !utf8.RuneStart(text[cut]) {
-		cut--
-	}
-	return text[:cut] + "…[truncated]"
+	return truncateText(text, errorTextBytesMax)
 }

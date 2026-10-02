@@ -10,11 +10,11 @@ tools and check a change.
 | Path | Content |
 | --- | --- |
 | `cmd/waythrough/` | The `main` package. It only calls `cli.Execute`. |
-| `internal/cli/` | The `waythrough` command-line interface: `init`, `instructions`, `validate`, `serve`, and the hidden `daemon` that `serve --shared` starts. |
+| `internal/cli/` | The `waythrough` command-line interface: `init`, `instructions`, `validate`, `serve`, `status`, and the hidden `daemon` that `serve --shared` starts. |
 | `internal/config/` | The user configuration schema, loader, validator, and init-only language-server presets. |
 | `internal/lsp/` | Process lifecycle for each configured language server, and the LSP client that talks to it. |
 | `internal/lsp/fakelsp/` | A small language server built only for `internal/lsp` tests. |
-| `internal/daemon/` | Shared mode: the workspace key, the private runtime directory, the locks, the daemon's session registry, and the client's attach and proxy. |
+| `internal/daemon/` | Shared mode: the workspace key, the private runtime directory, the locks, the daemon's session registry, its status socket, and the client's attach and proxy. |
 | `internal/editor/` | The MCP server. It turns each MCP tool call into an LSP request, and the LSP response back into MCP output. |
 | `scripts/` | `check.sh`, the check script, and `install-git-hooks.sh`, the hook installer. |
 | `.github/workflows/` | The CI workflow and the release workflow. |
@@ -233,6 +233,26 @@ stuck call ends when the drain stops that server.
 The decrement for each session is registered before any step that can
 fail. A client that leaves before its greeting therefore cannot leave a
 count that keeps the daemon alive.
+
+Each daemon also listens on a second socket, `<key>.status`. It
+answers each connection with one JSON report and a newline, then
+closes the connection. `waythrough status` reads every such socket in
+the runtime directory, in parallel, with a 2-second deadline. The
+status socket is separate from the session socket for two reasons. A
+status read never enters the registry, so it can neither stop nor
+re-arm the drain timer. And it still answers while the session socket
+refuses sessions at its limit. The daemon answers at most four status
+connections at once and closes any others unanswered. It closes the
+status socket last, after the sessions drain. During those seconds, a
+reader sees the daemon as `draining` rather than gone.
+
+The report joins three sources. The registry gives the session counts
+and the state. `runtime/metrics` gives the daemon's own goroutines and
+memory, without stopping the world. `lsp.Manager.Stats` gives each
+server instance. Each instance keeps its counters under a lock of its
+own, so recording a request never waits behind a lifecycle transition.
+The recent request figures come from a fixed ring of 64 samples.
+`internal/lsp/stats.go` defines the health rules.
 
 Two changes keep shared state safe:
 

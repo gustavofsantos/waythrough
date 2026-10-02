@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/gustavofsantos/waythrough/internal/lsp"
 )
 
 const (
@@ -39,6 +41,16 @@ type Options struct {
 	Linger time.Duration
 	// Logger receives the daemon's lifecycle records.
 	Logger *slog.Logger
+
+	// StatusListener answers status readers until Serve returns. Nil serves
+	// no status.
+	StatusListener *net.UnixListener
+	// Root and Version name the daemon in its status report.
+	Root    string
+	Version string
+	// LanguageServers reports the language servers for the status report.
+	// Nil reports none.
+	LanguageServers func() []lsp.InstanceStats
 }
 
 // Listen removes a stale socket file and listens at path.
@@ -68,6 +80,9 @@ func Listen(path string) (*net.UnixListener, error) {
 // which removes the socket file, and returns once every session handler has
 // returned or sessionCloseGrace has passed.
 //
+// The status listener answers through the drain, so a reader sees a
+// daemon draining rather than none, and Serve closes it last.
+//
 // The caller then stops the language servers. Serve never does, so that the
 // one owner of the servers is the one that started them.
 func Serve(ctx context.Context, listener *net.UnixListener, server *mcp.Server, options Options) {
@@ -76,18 +91,26 @@ func Serve(ctx context.Context, listener *net.UnixListener, server *mcp.Server, 
 	}
 	sessions := newRegistry(listener, options)
 	sessions.armTimer(options.StartupGrace)
+	statusDone := serveStatus(ctx, options.StatusListener, sessions, options)
+	defer func() {
+		if options.StatusListener != nil {
+			_ = options.StatusListener.Close()
+		}
+		<-statusDone
+	}()
 
 	var handlers sync.WaitGroup
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
-		acceptSessions(ctx, listener, sessions, func(conn *net.UnixConn) {
+		handle := func(conn *net.UnixConn) {
 			handlers.Add(1)
 			go func() {
 				defer handlers.Done()
 				serveSession(ctx, conn, server, sessions, options)
 			}()
-		})
+		}
+		acceptConnections(ctx, listener, options.Logger, sessions.isDraining, handle)
 	}()
 
 	select {
@@ -101,13 +124,15 @@ func Serve(ctx context.Context, listener *net.UnixListener, server *mcp.Server, 
 	waitWithGrace(&handlers, sessionCloseGrace, options.Logger)
 }
 
-// acceptSessions accepts until the listener closes. A failed accept that is
-// not the close, such as running out of descriptors, is retried with a
-// bounded backoff rather than ending the daemon its sessions rely on.
-func acceptSessions(
+// acceptConnections accepts until the listener closes or stopped reports
+// true. A failed accept that is not the close, such as running out of
+// descriptors, is retried with a bounded backoff rather than ending the
+// daemon its sessions rely on.
+func acceptConnections(
 	ctx context.Context,
 	listener *net.UnixListener,
-	sessions *registry,
+	logger *slog.Logger,
+	stopped func() bool,
 	handle func(*net.UnixConn),
 ) {
 	retry := acceptRetryFirst
@@ -118,10 +143,10 @@ func acceptSessions(
 			handle(conn)
 			continue
 		}
-		if sessions.isDraining() || errors.Is(err, net.ErrClosed) {
+		if stopped() || errors.Is(err, net.ErrClosed) {
 			return
 		}
-		sessions.logger.Warn("daemon accept failed", slog.String("error", err.Error()))
+		logger.Warn("daemon accept failed", slog.String("error", err.Error()))
 		select {
 		case <-time.After(retry):
 		case <-ctx.Done():
@@ -145,6 +170,7 @@ func serveSession(
 
 	uid, err := peerUID(conn)
 	if err != nil || uid != os.Geteuid() {
+		sessions.refusePeer()
 		options.Logger.Warn("daemon refused a peer",
 			slog.Int("peer_uid", uid), slog.Any("error", err))
 		return
