@@ -20,6 +20,7 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/editor"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 // listToolsTimeout bounds the in-memory MCP handshake below, so a session
@@ -51,7 +52,8 @@ type toolSchema struct {
 func advertisedTools(ctx context.Context) []toolSchema {
 	cfg := config.Config{LanguageServers: config.Presets()}
 	manager := lsp.NewManager(GinkgoT().TempDir(), cfg.LanguageServers)
-	server := editor.New(manager, cfg, slog.New(slog.DiscardHandler))
+	source := status.Source{LanguageServers: manager.Stats}
+	server := editor.New(manager, cfg, slog.New(slog.DiscardHandler), source.Report)
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	_, err := server.Connect(ctx, serverTransport, nil)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 // New builds the MCP server exposing editor operations backed by manager's
@@ -23,14 +24,22 @@ import (
 // logger records every request the server handles, at debug level. Pass
 // slog.New(slog.DiscardHandler) to record nothing.
 //
-// Precondition: logger is not nil, so no call site here has to guard a log
-// statement.
-func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Server {
+// report answers get_status. It is the status of whatever process serves
+// this MCP server, which knows whether sessions share it.
+//
+// Precondition: logger and report are not nil, so no call site here has to
+// guard them.
+func New(
+	manager *lsp.Manager, cfg config.Config, logger *slog.Logger, report func() status.Report,
+) *mcp.Server {
 	if logger == nil {
 		panic("editor: New needs a logger, got nil")
 	}
+	if report == nil {
+		panic("editor: New needs a status report, got nil")
+	}
 
-	e := &editor{manager: manager, serverForExt: routeByExtension(cfg)}
+	e := &editor{manager: manager, serverForExt: routeByExtension(cfg), report: report}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "waythrough", Version: "0.1.0"}, nil)
 	// recoverPanics comes first, so it is outermost and also covers a panic
@@ -76,6 +85,7 @@ func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Serv
 			"it serves. Every other language server keeps running. " +
 			"Every session sharing this server sees the restart too.",
 	}, e.restartServer)
+	addStatusTool(server, e)
 
 	return server
 }
@@ -83,6 +93,7 @@ func New(manager *lsp.Manager, cfg config.Config, logger *slog.Logger) *mcp.Serv
 type editor struct {
 	manager      *lsp.Manager
 	serverForExt map[string]string
+	report       func() status.Report
 }
 
 // routeByExtension builds the extension-to-server routing table.

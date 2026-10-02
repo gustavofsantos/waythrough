@@ -17,6 +17,7 @@ import (
 
 	"github.com/gustavofsantos/waythrough/internal/daemon"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 const (
@@ -52,7 +53,7 @@ func newStatusCommand() *cobra.Command {
 type daemonStatus struct {
 	key    string
 	paths  daemon.Paths
-	report daemon.Report
+	report status.Report
 	err    error
 	// staleRemoved means no daemon held the key's lock, so its sockets
 	// were left by one that was killed, and this read removed them.
@@ -97,20 +98,20 @@ func readStatuses(runtimeDir string, keys []string) ([]daemonStatus, error) {
 		reads.Add(1)
 		go func() {
 			defer reads.Done()
-			status := &statuses[index]
-			status.report, status.err = daemon.ReadStatus(status.paths.Status, deadline)
-			if !errors.Is(status.err, daemon.ErrNotRunning) {
+			read := &statuses[index]
+			read.report, read.err = daemon.ReadStatus(read.paths.Status, deadline)
+			if !errors.Is(read.err, daemon.ErrNotRunning) {
 				return
 			}
 			// No daemon listens. Either one was killed and left its sockets,
 			// or one is stopping its language servers after closing them;
 			// only the second still holds the daemon lock.
-			removed, err := daemon.RemoveStaleSockets(status.paths)
+			removed, err := daemon.RemoveStaleSockets(read.paths)
 			if err != nil {
-				status.err = err
+				read.err = err
 				return
 			}
-			status.staleRemoved = removed
+			read.staleRemoved = removed
 		}()
 	}
 	reads.Wait()
@@ -120,7 +121,7 @@ func readStatuses(runtimeDir string, keys []string) ([]daemonStatus, error) {
 // statusOutput is the JSON form of the status command. Daemons holds each
 // report as the daemon sent it.
 type statusOutput struct {
-	Daemons     []daemon.Report     `json:"daemons"`
+	Daemons     []status.Report     `json:"daemons"`
 	Unreachable []unreachableDaemon `json:"unreachable"`
 	// Omitted counts the daemons past statusDaemonsMax that were not read.
 	Omitted int `json:"omitted"`
@@ -140,22 +141,22 @@ type unreachableDaemon struct {
 
 func writeStatusJSON(stdout io.Writer, statuses []daemonStatus, omitted int) error {
 	output := statusOutput{
-		Daemons:     []daemon.Report{},
+		Daemons:     []status.Report{},
 		Unreachable: []unreachableDaemon{},
 		Omitted:     omitted,
 	}
-	for _, status := range statuses {
-		if status.err == nil {
-			output.Daemons = append(output.Daemons, status.report)
+	for _, read := range statuses {
+		if read.err == nil {
+			output.Daemons = append(output.Daemons, read.report)
 			continue
 		}
-		notRunning := errors.Is(status.err, daemon.ErrNotRunning)
+		notRunning := errors.Is(read.err, daemon.ErrNotRunning)
 		output.Unreachable = append(output.Unreachable, unreachableDaemon{
-			Key:      status.key,
-			Log:      status.paths.Log,
-			Stale:    notRunning && status.staleRemoved,
-			Stopping: notRunning && !status.staleRemoved,
-			Error:    status.err.Error(),
+			Key:      read.key,
+			Log:      read.paths.Log,
+			Stale:    notRunning && read.staleRemoved,
+			Stopping: notRunning && !read.staleRemoved,
+			Error:    read.err.Error(),
 		})
 	}
 	encoder := json.NewEncoder(stdout)
@@ -169,14 +170,14 @@ func writeStatusJSON(stdout io.Writer, statuses []daemonStatus, omitted int) err
 func writeStatusText(stdout io.Writer, statuses []daemonStatus, omitted int, now time.Time) error {
 	var text strings.Builder
 	shown := 0
-	for _, status := range statuses {
-		if status.err != nil {
+	for _, read := range statuses {
+		if read.err != nil {
 			continue
 		}
 		if shown > 0 {
 			text.WriteString("\n")
 		}
-		writeDaemonText(&text, status, now)
+		writeDaemonText(&text, read, now)
 		shown++
 	}
 	if len(statuses) == 0 {
@@ -184,22 +185,22 @@ func writeStatusText(stdout io.Writer, statuses []daemonStatus, omitted int, now
 			"A daemon runs while a `waythrough serve --shared` session needs it.\n")
 	}
 
-	for _, status := range statuses {
-		if status.err == nil {
+	for _, read := range statuses {
+		if read.err == nil {
 			continue
 		}
-		if !errors.Is(status.err, daemon.ErrNotRunning) {
+		if !errors.Is(read.err, daemon.ErrNotRunning) {
 			fmt.Fprintf(&text, "\nunreachable daemon %s: %s\n  log: %s\n",
-				status.key, printable(status.err.Error()), status.paths.Log)
+				read.key, printable(read.err.Error()), read.paths.Log)
 			continue
 		}
-		if status.staleRemoved {
+		if read.staleRemoved {
 			fmt.Fprintf(&text, "\nremoved the sockets of daemon %s, which was killed "+
-				"without removing them.\n  log: %s\n", status.key, status.paths.Log)
+				"without removing them.\n  log: %s\n", read.key, read.paths.Log)
 			continue
 		}
 		fmt.Fprintf(&text, "\ndaemon %s is stopping its language servers.\n  log: %s\n",
-			status.key, status.paths.Log)
+			read.key, read.paths.Log)
 	}
 	if omitted > 0 {
 		fmt.Fprintf(&text, "\n%d more daemons not shown; the limit is %d.\n",
@@ -212,9 +213,10 @@ func writeStatusText(stdout io.Writer, statuses []daemonStatus, omitted int, now
 	return nil
 }
 
-func writeDaemonText(text *strings.Builder, status daemonStatus, now time.Time) {
-	report := status.report
-	sessions := report.Sessions
+func writeDaemonText(text *strings.Builder, read daemonStatus, now time.Time) {
+	report := read.report
+	// ReadStatus refuses a daemon report with no sessions.
+	sessions := *report.Sessions
 	fmt.Fprintf(text, "%s  [%s]\n", printable(report.Root), report.Health)
 	fmt.Fprintf(text, "  daemon    pid %d, waythrough %s, up %s, %s\n",
 		report.PID, report.Version, formatDuration(now.Sub(report.StartedAt)),
@@ -225,7 +227,7 @@ func writeDaemonText(text *strings.Builder, status daemonStatus, now time.Time) 
 	fmt.Fprintf(text, "  runtime   %d goroutines, %s heap, %s total\n",
 		report.Runtime.Goroutines, formatBytes(report.Runtime.HeapBytes),
 		formatBytes(report.Runtime.TotalBytes))
-	fmt.Fprintf(text, "  log       %s\n\n", status.paths.Log)
+	fmt.Fprintf(text, "  log       %s\n\n", read.paths.Log)
 
 	table := tabwriter.NewWriter(text, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(table, "  SERVER\tROOT\tSTATUS\tHEALTH\tPID\tUP\tSTARTUP\tRSS\tDOCS\t"+
@@ -276,7 +278,7 @@ func writeServerRow(table io.Writer, daemonRoot string, server lsp.InstanceStats
 		server.CrashesInWindow, server.CrashLimit)
 }
 
-func describeState(sessions daemon.SessionStats, now time.Time) string {
+func describeState(sessions status.SessionStats, now time.Time) string {
 	state := string(sessions.State)
 	if sessions.DrainAt.IsZero() {
 		return state

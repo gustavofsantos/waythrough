@@ -35,6 +35,8 @@ These take `file`, `line`, `column` — 1-based, on the symbol itself:
 - Go to definition → `get_definition`
 - Find all references → `list_references`
 - Which argument goes here → `signature_help`
+- Direct callers or callees → `get_call_hierarchy`, plus `direction`
+  (incoming or outgoing; one level per call)
 - Rename across the project → `rename_symbol`, plus `new_name`
   (returns edits; you apply them)
 
@@ -42,6 +44,8 @@ These do not:
 
 - Errors and warnings in a file → `get_diagnostics` (`file`)
 - Answers stopped matching the code → `restart_server` (`server`)
+- A call failed or was slow → `get_status` (which servers run, and how
+  healthy each one is)
 
 Search for a name when you need one; resolve it with these. A file type
 with no configured language server has no answers here.

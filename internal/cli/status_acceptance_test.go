@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -92,6 +93,42 @@ var _ = Describe("status", func() {
 		Expect(text).To(ContainSubstring(workspace.root + "  [healthy]"))
 		Expect(text).To(ContainSubstring("1 active of 64"))
 		Expect(text).To(MatchRegexp(`fake\s+\.\s+ready\s+healthy`))
+	})
+
+	// The agent's view and the person's view are one report: through the
+	// daemon, get_status sees the sessions the agent shares servers with.
+	It("gives a shared session's agent the same report through get_status", func() {
+		workspace := newSharedWorkspace()
+		first := workspace.startSession(time.Hour)
+		second := workspace.startSession(time.Hour)
+		Expect(first.definitionLine(workspace.file)).To(Equal(5))
+
+		result, err := second.session.CallTool(context.Background(),
+			&mcp.CallToolParams{Name: "get_status"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.IsError).To(BeFalse())
+		var report struct {
+			Mode     string `json:"mode"`
+			PID      int    `json:"pid"`
+			Sessions struct {
+				Active int `json:"active"`
+			} `json:"sessions"`
+			LanguageServers []struct {
+				Status   string `json:"status"`
+				Requests struct {
+					Total int `json:"total"`
+				} `json:"requests"`
+			} `json:"language_servers"`
+		}
+		text := result.Content[0].(*mcp.TextContent).Text
+		Expect(json.Unmarshal([]byte(text), &report)).To(Succeed())
+		Expect(report.Mode).To(Equal("shared"))
+		Expect(report.PID).To(Equal(workspace.daemonPIDs()[0]))
+		Expect(report.Sessions.Active).To(Equal(2))
+		Expect(report.LanguageServers).To(HaveLen(1))
+		Expect(report.LanguageServers[0].Status).To(Equal("ready"))
+		Expect(report.LanguageServers[0].Requests.Total).To(Equal(1),
+			"the other session's request reached the same server")
 	})
 
 	It("removes the sockets of a daemon that was killed", func() {

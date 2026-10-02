@@ -16,6 +16,7 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/editor"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 // shutdownGrace bounds how long serve waits, after the MCP session ends,
@@ -84,7 +85,13 @@ func runServe(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := editor.New(manager, cfg, logger)
+	source := status.Source{
+		Root:            root,
+		Version:         version,
+		StartedAt:       time.Now(),
+		LanguageServers: manager.Stats,
+	}
+	server := editor.New(manager, cfg, logger, source.Report)
 	runErr := server.Run(ctx, &mcp.StdioTransport{})
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)

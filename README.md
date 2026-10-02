@@ -73,7 +73,7 @@ repositories without adding a repository-owned file.
 
 ## Status
 
-This project is in early setup. It has six MCP tools. Tests run
+This project is in early setup. It has eight MCP tools. Tests run
 them against a test language server, not against a real one yet.
 
 ## Install
@@ -345,7 +345,8 @@ same gap.
 ### Check on running daemons
 
 Run `waythrough status` from any directory to see every daemon that runs
-for your user:
+for your user. Your agent sees the same report for its own workspace
+through the `get_status` tool (see [Tools](#tools)):
 
 ```text
 /home/me/project  [healthy]
@@ -431,6 +432,24 @@ Waythrough exposes these MCP tools to a connected coding agent:
   With `--shared`, the restart reaches every session in the
   workspace. A call those sessions have in flight fails and says the
   server restarted.
+- `get_status` — report the health of the language servers behind
+  these tools. It takes no arguments and returns the same report as
+  `waythrough status --json`, for the current process only. The
+  report covers which servers run and for which root, whether each
+  is ready, still starting, degraded, or failing, its recent latency
+  and failures, and its last error. With `--shared`, it also reports
+  the sessions that share the servers. An agent uses it when a call
+  fails or is slow, to decide whether to wait or to call
+  `restart_server`.
+
+  `get_status` also comes with a page. A host that supports the
+  [MCP Apps](https://modelcontextprotocol.io/extensions/apps)
+  extension, such as Claude, shows the page beside the result: the
+  health of each server, summary tiles, a table of servers, and the
+  last errors. It also has a Refresh button and an optional refresh
+  every 5 seconds. Automatic refresh stops after 10 minutes, and
+  pauses while the page is hidden. The page loads nothing from the
+  network. A host without MCP Apps shows the report as data.
 
 File-based tools accept regular source files up to 16 MiB. Waythrough rejects
 larger files and non-regular paths before it sends content to a language server.

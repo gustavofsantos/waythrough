@@ -2,6 +2,7 @@ package daemon_test
 
 import (
 	"bytes"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gustavofsantos/waythrough/internal/daemon"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 // startDaemonWithStatus is startDaemon with a status socket, which it
@@ -24,7 +26,7 @@ func startDaemonWithStatus(options daemon.Options) (runningDaemon, string) {
 	return startDaemon(options), statusSocket
 }
 
-func readStatus(socket string) daemon.Report {
+func readStatus(socket string) status.Report {
 	report, err := daemon.ReadStatus(socket, time.Now().Add(5*time.Second))
 	Expect(err).NotTo(HaveOccurred())
 	return report
@@ -36,21 +38,24 @@ var _ = Describe("Status", func() {
 			{Name: "gopls", Root: "/work", Status: "ready", Health: lsp.HealthDegraded},
 		}
 		running, statusSocket := startDaemonWithStatus(daemon.Options{
-			StartupGrace:    time.Hour,
-			Linger:          time.Hour,
-			Root:            "/work",
-			Version:         "v9.9.9",
-			LanguageServers: func() []lsp.InstanceStats { return servers },
+			StartupGrace: time.Hour,
+			Linger:       time.Hour,
+			Status: status.Source{
+				Root:            "/work",
+				Version:         "v9.9.9",
+				LanguageServers: func() []lsp.InstanceStats { return servers },
+			},
 		})
 
 		report := readStatus(statusSocket)
-		Expect(report.Format).To(Equal(daemon.StatusFormat))
+		Expect(report.Format).To(Equal(status.Format))
+		Expect(report.Mode).To(Equal(status.ModeShared))
 		Expect(report.Key).To(Equal(testKey))
 		Expect(report.PID).To(Equal(os.Getpid()))
 		Expect(report.Root).To(Equal("/work"))
 		Expect(report.Version).To(Equal("v9.9.9"))
 		Expect(report.StartedAt).To(BeTemporally("~", time.Now(), 10*time.Second))
-		Expect(report.Sessions.State).To(Equal(daemon.StateStarting))
+		Expect(report.Sessions.State).To(Equal(status.StateStarting))
 		Expect(report.Sessions.Max).To(Equal(daemon.MaxSessions))
 		Expect(report.Sessions.DrainAt).
 			To(BeTemporally("~", time.Now().Add(time.Hour), time.Minute))
@@ -63,14 +68,32 @@ var _ = Describe("Status", func() {
 		session := attach(running.socket)
 		Expect(echo(session, "hello")).To(Equal("hello"))
 		serving := readStatus(statusSocket).Sessions
-		Expect(serving.State).To(Equal(daemon.StateServing))
+		Expect(serving.State).To(Equal(status.StateServing))
 		Expect(serving.Active).To(Equal(1))
 		Expect(serving.AdmittedTotal).To(Equal(uint64(1)))
 		Expect(serving.DrainAt.IsZero()).To(BeTrue(), "no timer runs while a session is connected")
 
 		Expect(session.Close()).To(Succeed())
-		Eventually(func() daemon.DaemonState { return readStatus(statusSocket).Sessions.State }).
-			Should(Equal(daemon.StateLingering))
+		Eventually(func() status.DaemonState { return readStatus(statusSocket).Sessions.State }).
+			Should(Equal(status.StateLingering))
+	})
+
+	// New exists so the MCP server can hold Report before any session is
+	// admitted, so Report must answer then too.
+	It("reports a daemon that has not started serving as starting", func() {
+		listener, err := daemon.Listen(shortSocketPath())
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(listener.Close)
+		running := daemon.New(listener, daemon.Options{
+			Key: testKey, Logger: slog.New(slog.DiscardHandler),
+		})
+
+		report := running.Report()
+		Expect(report.Mode).To(Equal(status.ModeShared))
+		Expect(report.Key).To(Equal(testKey))
+		Expect(report.Sessions.State).To(Equal(status.StateStarting))
+		Expect(report.Sessions.DrainAt.IsZero()).To(BeTrue(), "no timer runs before Serve")
+		Expect(report.LanguageServers).To(BeEmpty())
 	})
 
 	// A status read that counted as a session would stop and re-arm the
@@ -123,7 +146,7 @@ var _ = Describe("Status", func() {
 	It("accepts a report of exactly the limit, its newline included", func() {
 		statusSocket := shortSocketPath()
 		fakeDaemon(statusSocket, func(conn net.Conn) {
-			report := []byte(`{"format": 1, "pid": 7}`)
+			report := []byte(`{"format": 1, "mode": "shared", "pid": 7, "sessions": {}}`)
 			padding := bytes.Repeat([]byte(" "), daemon.StatusReportBytesMax-len(report)-1)
 			_, _ = conn.Write(append(append(report, padding...), '\n'))
 		})

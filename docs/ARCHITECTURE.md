@@ -15,7 +15,8 @@ tools and check a change.
 | `internal/lsp/` | Process lifecycle for each configured language server, and the LSP client that talks to it. |
 | `internal/lsp/fakelsp/` | A small language server built only for `internal/lsp` tests. |
 | `internal/daemon/` | Shared mode: the workspace key, the private runtime directory, the locks, the daemon's session registry, its status socket, and the client's attach and proxy. |
-| `internal/editor/` | The MCP server. It turns each MCP tool call into an LSP request, and the LSP response back into MCP output. |
+| `internal/editor/` | The MCP server. It turns each MCP tool call into an LSP request, and the LSP response back into MCP output. It also serves the `get_status` report and its MCP Apps page. |
+| `internal/status/` | The status report that `get_status` and `waythrough status` share, and the health rule that joins its parts. |
 | `scripts/` | `check.sh`, the check script, and `install-git-hooks.sh`, the hook installer. |
 | `.github/workflows/` | The CI workflow and the release workflow. |
 | `.tools/` | A gitignored directory. It holds the pinned `golangci-lint` binary. |
@@ -38,7 +39,8 @@ tools and check a change.
 4. `internal/cli` builds the MCP server from `internal/editor`. This
    step registers the `get_definition`, `list_references`,
    `rename_symbol`, `signature_help`, `get_call_hierarchy`,
-   `get_diagnostics`, and `restart_server` tools.
+   `get_diagnostics`, `restart_server`, and `get_status` tools, and the
+   `ui://waythrough/status` page that goes with `get_status`.
 5. The MCP server serves tool calls until the agent's session ends.
    `internal/editor` routes each call, by the file extension in the
    call, to the language server that handles it. It sends the LSP
@@ -249,6 +251,21 @@ answers, `status` takes the key's daemon lock without waiting. If it
 gets the lock, the daemon was killed, so `status` removes the sockets
 it left, as `Listen` would. If another process holds the lock, the
 daemon is stopping its language servers, and `status` says so.
+
+`internal/status` defines the report. The status socket and the
+`get_status` MCP tool both serve it, so the two can never disagree. A
+plain `serve` builds its report from a `status.Source` with no
+sessions. A daemon is built in two steps, `daemon.New` and then
+`Daemon.Serve`. The MCP server can then take `Daemon.Report` before
+the first session arrives, and an agent's `get_status` reports the
+sessions it shares its servers with.
+
+`get_status` points to its page through `_meta.ui.resourceUri`, as the
+MCP Apps extension specifies. The page, `internal/editor/status_app.html`,
+is embedded in the binary. It talks to the host over `postMessage`
+JSON-RPC: `ui/initialize`, then the tool result, then `tools/call` for
+each refresh. It loads nothing from the network, and it writes every
+report value as text. A spec checks both.
 
 The report joins three sources. The registry gives the session counts
 and the state. `runtime/metrics` gives the daemon's own goroutines and

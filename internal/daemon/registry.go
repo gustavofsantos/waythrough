@@ -5,6 +5,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 type admission int
@@ -25,8 +27,6 @@ type registry struct {
 	linger   time.Duration
 	drained  chan struct{}
 
-	startedAt time.Time
-
 	mu       sync.Mutex
 	sessions map[*net.UnixConn]struct{}
 	draining bool
@@ -45,12 +45,11 @@ type registry struct {
 
 func newRegistry(listener *net.UnixListener, options Options) *registry {
 	return &registry{
-		listener:  listener,
-		logger:    options.Logger,
-		linger:    options.Linger,
-		drained:   make(chan struct{}),
-		startedAt: time.Now(),
-		sessions:  make(map[*net.UnixConn]struct{}, MaxSessions),
+		listener: listener,
+		logger:   options.Logger,
+		linger:   options.Linger,
+		drained:  make(chan struct{}),
+		sessions: make(map[*net.UnixConn]struct{}, MaxSessions),
 	}
 }
 
@@ -151,44 +150,12 @@ func (r *registry) refusePeer() {
 	r.refusedPeer++
 }
 
-// DaemonState is where a daemon is in its own lifecycle.
-type DaemonState string
-
-const (
-	// StateStarting means no session has arrived yet; the startup grace
-	// drains the daemon if none does.
-	StateStarting DaemonState = "starting"
-	// StateServing means at least one session is connected.
-	StateServing DaemonState = "serving"
-	// StateLingering means the last session left, and the linger drains the
-	// daemon unless another arrives.
-	StateLingering DaemonState = "lingering"
-	// StateDraining means the daemon admits no session and is stopping.
-	StateDraining DaemonState = "draining"
-)
-
-// SessionStats is the session side of a status report.
-type SessionStats struct {
-	State  DaemonState `json:"state"`
-	Active int         `json:"active"`
-	Max    int         `json:"max"`
-	// AdmittedTotal counts every session since the daemon started.
-	AdmittedTotal uint64 `json:"admitted_total"`
-	// RefusedBusy counts the sessions refused at the MaxSessions limit.
-	RefusedBusy uint64 `json:"refused_busy"`
-	// RefusedPeer counts the connections refused as another user's.
-	RefusedPeer uint64 `json:"refused_peer"`
-	// DrainAt is when the daemon drains if no session arrives first, and is
-	// zero while a session is connected or once draining has begun.
-	DrainAt time.Time `json:"drain_at,omitzero"`
-}
-
 // stats reads the session figures in one hold of the lock, so they agree
 // with one another.
-func (r *registry) stats() SessionStats {
+func (r *registry) stats() status.SessionStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	stats := SessionStats{
+	stats := status.SessionStats{
 		Active:        len(r.sessions),
 		Max:           MaxSessions,
 		AdmittedTotal: r.admittedTotal,
@@ -198,13 +165,13 @@ func (r *registry) stats() SessionStats {
 	}
 	switch {
 	case r.draining:
-		stats.State = StateDraining
+		stats.State = status.StateDraining
 	case len(r.sessions) > 0:
-		stats.State = StateServing
+		stats.State = status.StateServing
 	case r.admittedTotal == 0:
-		stats.State = StateStarting
+		stats.State = status.StateStarting
 	default:
-		stats.State = StateLingering
+		stats.State = status.StateLingering
 	}
 	return stats
 }
