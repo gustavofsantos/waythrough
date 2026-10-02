@@ -210,6 +210,9 @@ var _ = Describe("get_call_hierarchy", func() {
 			cfg := fakeConfig("-call-hierarchy", "-request-log="+requestLog)
 			manager := lsp.NewManager(root, cfg.LanguageServers)
 			session := connect(ctx, manager, cfg)
+			// The call is refused before it reaches the server, so nothing
+			// else waits for the server to start and open its request log.
+			Expect(manager.WaitReady(ctx, "fake", 5*time.Second)).To(Succeed())
 
 			result := callHierarchyTool(ctx, session, 1, "sideways")
 			Expect(result.IsError).To(BeTrue())
