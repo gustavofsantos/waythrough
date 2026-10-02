@@ -17,6 +17,7 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/editor"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 type Options struct {
@@ -120,7 +121,8 @@ func newWaythroughRunner(ctx context.Context, fixtureDirectory string) (*waythro
 		return nil, err
 	}
 	runner := &waythroughRunner{manager: manager}
-	server := editor.New(manager, cfg, slog.New(slog.DiscardHandler))
+	source := status.Source{Root: fixtureDirectory, LanguageServers: manager.Stats}
+	server := editor.New(manager, cfg, slog.New(slog.DiscardHandler), source.Report)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
 		return nil, errors.Join(err, shutdownManager(manager))

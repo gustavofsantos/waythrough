@@ -8,9 +8,13 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 const (
@@ -39,6 +43,68 @@ type Options struct {
 	Linger time.Duration
 	// Logger receives the daemon's lifecycle records.
 	Logger *slog.Logger
+
+	// StatusListener answers status readers until Serve returns. Nil serves
+	// no status.
+	StatusListener *net.UnixListener
+	// Status names the daemon's root, version, and language servers in its
+	// reports. New fills in the key, the start time, and the sessions, so
+	// those must be left empty here. A nil LanguageServers reports none.
+	Status status.Source
+}
+
+// Daemon is one shared daemon: the sessions it admits and the report it
+// gives of itself. New and Serve are separate so that the MCP server the
+// daemon serves can be built with the daemon's Report before the first
+// session is admitted.
+type Daemon struct {
+	listener *net.UnixListener
+	options  Options
+	logger   *slog.Logger
+	sessions *registry
+	source   status.Source
+	served   atomic.Bool
+}
+
+// New builds a daemon that will serve on listener. It admits nothing until
+// Serve runs.
+func New(listener *net.UnixListener, options Options) *Daemon {
+	if listener == nil {
+		panic("daemon: New needs a listener, got nil")
+	}
+	if options.Logger == nil {
+		panic("daemon: New needs a logger, got nil")
+	}
+	source := options.Status
+	if source.Sessions != nil || source.Key != "" || !source.StartedAt.IsZero() {
+		panic("daemon: Options.Status must leave Key, StartedAt, and Sessions to New")
+	}
+	running := &Daemon{
+		listener: listener,
+		options:  options,
+		logger:   options.Logger,
+		sessions: newRegistry(listener, options),
+	}
+	if source.LanguageServers == nil {
+		source.LanguageServers = func() []lsp.InstanceStats { return nil }
+	}
+	source.Key = options.Key
+	source.StartedAt = time.Now()
+	source.Sessions = running.sessions.stats
+	running.source = source
+	return running
+}
+
+// Report is the daemon's account of itself now. It is safe to call from
+// any goroutine, before, during, and after Serve.
+func (d *Daemon) Report() status.Report {
+	return d.source.Report()
+}
+
+// Serve is New(listener, options).Serve(ctx, server), for a caller that
+// needs no report before the daemon serves.
+func Serve(ctx context.Context, listener *net.UnixListener, server *mcp.Server, options Options) {
+	New(listener, options).Serve(ctx, server)
 }
 
 // Listen removes a stale socket file and listens at path.
@@ -62,32 +128,45 @@ func Listen(path string) (*net.UnixListener, error) {
 	return listener, nil
 }
 
-// Serve runs one MCP session of server for each connection listener
+// Serve runs one MCP session of server for each connection the listener
 // accepts, until the daemon drains: when no session has been connected for
 // the startup grace or the linger, or when ctx ends. It closes listener,
 // which removes the socket file, and returns once every session handler has
 // returned or sessionCloseGrace has passed.
 //
+// The status listener answers through the drain, so a reader sees a
+// daemon draining rather than none, and Serve closes it last.
+//
 // The caller then stops the language servers. Serve never does, so that the
 // one owner of the servers is the one that started them.
-func Serve(ctx context.Context, listener *net.UnixListener, server *mcp.Server, options Options) {
-	if options.Logger == nil {
-		panic("daemon: Serve needs a logger, got nil")
+//
+// Precondition: Serve runs once per Daemon.
+func (d *Daemon) Serve(ctx context.Context, server *mcp.Server) {
+	if d.served.Swap(true) {
+		panic("daemon: Serve called twice on one Daemon")
 	}
-	sessions := newRegistry(listener, options)
+	listener, options, sessions := d.listener, d.options, d.sessions
 	sessions.armTimer(options.StartupGrace)
+	statusDone := serveStatus(ctx, options.StatusListener, d)
+	defer func() {
+		if options.StatusListener != nil {
+			_ = options.StatusListener.Close()
+		}
+		<-statusDone
+	}()
 
 	var handlers sync.WaitGroup
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
-		acceptSessions(ctx, listener, sessions, func(conn *net.UnixConn) {
+		handle := func(conn *net.UnixConn) {
 			handlers.Add(1)
 			go func() {
 				defer handlers.Done()
 				serveSession(ctx, conn, server, sessions, options)
 			}()
-		})
+		}
+		acceptConnections(ctx, listener, options.Logger, sessions.isDraining, handle)
 	}()
 
 	select {
@@ -101,13 +180,15 @@ func Serve(ctx context.Context, listener *net.UnixListener, server *mcp.Server, 
 	waitWithGrace(&handlers, sessionCloseGrace, options.Logger)
 }
 
-// acceptSessions accepts until the listener closes. A failed accept that is
-// not the close, such as running out of descriptors, is retried with a
-// bounded backoff rather than ending the daemon its sessions rely on.
-func acceptSessions(
+// acceptConnections accepts until the listener closes or stopped reports
+// true. A failed accept that is not the close, such as running out of
+// descriptors, is retried with a bounded backoff rather than ending the
+// daemon its sessions rely on.
+func acceptConnections(
 	ctx context.Context,
 	listener *net.UnixListener,
-	sessions *registry,
+	logger *slog.Logger,
+	stopped func() bool,
 	handle func(*net.UnixConn),
 ) {
 	retry := acceptRetryFirst
@@ -118,10 +199,10 @@ func acceptSessions(
 			handle(conn)
 			continue
 		}
-		if sessions.isDraining() || errors.Is(err, net.ErrClosed) {
+		if stopped() || errors.Is(err, net.ErrClosed) {
 			return
 		}
-		sessions.logger.Warn("daemon accept failed", slog.String("error", err.Error()))
+		logger.Warn("daemon accept failed", slog.String("error", err.Error()))
 		select {
 		case <-time.After(retry):
 		case <-ctx.Done():
@@ -145,6 +226,7 @@ func serveSession(
 
 	uid, err := peerUID(conn)
 	if err != nil || uid != os.Geteuid() {
+		sessions.refusePeer()
 		options.Logger.Warn("daemon refused a peer",
 			slog.Int("peer_uid", uid), slog.Any("error", err))
 		return

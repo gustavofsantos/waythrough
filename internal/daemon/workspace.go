@@ -93,7 +93,13 @@ type Paths struct {
 	Spawn string
 	// Log receives the daemon's stderr.
 	Log string
+	// Status answers status readers: see Report.
+	Status string
 }
+
+// statusSuffix names a key's status socket. It is the longest socket name a
+// key has, so it is the one PathsFor measures against sun_path.
+const statusSuffix = ".status"
 
 // PathsFor returns the files for key in runtimeDir. It fails when the
 // socket path does not fit in sun_path, because the kernel would otherwise
@@ -104,13 +110,14 @@ func PathsFor(runtimeDir, key string) (Paths, error) {
 		Lock:   filepath.Join(runtimeDir, key+".lock"),
 		Spawn:  filepath.Join(runtimeDir, key+".spawn"),
 		Log:    filepath.Join(runtimeDir, key+".log"),
+		Status: filepath.Join(runtimeDir, key+statusSuffix),
 	}
 	maxBytes := maxSocketPathBytes()
-	if len(paths.Socket) > maxBytes {
+	if len(paths.Status) > maxBytes {
 		return Paths{}, fmt.Errorf(
 			"daemon socket path %s is %d bytes; maximum is %d on %s "+
 				"(set XDG_RUNTIME_DIR or TMPDIR to a shorter directory)",
-			paths.Socket, len(paths.Socket), maxBytes, runtime.GOOS)
+			paths.Status, len(paths.Status), maxBytes, runtime.GOOS)
 	}
 	return paths, nil
 }

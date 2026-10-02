@@ -45,6 +45,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newInstructionsCommand())
 	root.AddCommand(newValidateCommand())
 	root.AddCommand(newServeCommand())
+	root.AddCommand(newStatusCommand())
 	root.AddCommand(newDaemonCommand())
 
 	return root

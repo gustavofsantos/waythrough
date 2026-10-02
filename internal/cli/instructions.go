@@ -61,6 +61,8 @@ const agentInstructions = instructionsStartMarker + "\n" +
 	"\n" +
 	"- Errors and warnings in a file → `get_diagnostics` (`file`)\n" +
 	"- Answers stopped matching the code → `restart_server` (`server`)\n" +
+	"- A call failed or was slow → `get_status` (which servers run, and how\n" +
+	"  healthy each one is)\n" +
 	"\n" +
 	"Search for a name when you need one; resolve it with these. A file type\n" +
 	"with no configured language server has no answers here.\n" +

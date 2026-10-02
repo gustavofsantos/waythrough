@@ -17,6 +17,7 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/daemon"
 	"github.com/gustavofsantos/waythrough/internal/editor"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 // daemonOptions are what `serve --shared` passes to the daemon it starts.
@@ -101,11 +102,17 @@ func runDaemon(stderr io.Writer, options daemonOptions) error {
 	if err != nil {
 		return err
 	}
+	statusListener, err := daemon.Listen(paths.Status)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
 
 	manager := lsp.NewManager(options.root, cfg.LanguageServers,
 		lsp.WithLogger(logger), lsp.WithDemandStart())
 	if err := manager.Start(context.Background()); err != nil {
 		_ = listener.Close()
+		_ = statusListener.Close()
 		return err
 	}
 
@@ -117,12 +124,21 @@ func runDaemon(stderr io.Writer, options daemonOptions) error {
 	defer stop()
 
 	logger.Debug("waythrough daemon serving")
-	daemon.Serve(ctx, listener, editor.New(manager, cfg, logger), daemon.Options{
-		Key:          options.key,
-		StartupGrace: time.Until(options.attachDeadline),
-		Linger:       options.linger,
-		Logger:       logger,
+	running := daemon.New(listener, daemon.Options{
+		Key:            options.key,
+		StartupGrace:   time.Until(options.attachDeadline),
+		Linger:         options.linger,
+		Logger:         logger,
+		StatusListener: statusListener,
+		Status: status.Source{
+			Root:            options.root,
+			Version:         version,
+			LanguageServers: manager.Stats,
+		},
 	})
+	// The MCP server reports through the daemon, so an agent's get_status
+	// sees the sessions it shares its servers with.
+	running.Serve(ctx, editor.New(manager, cfg, logger, running.Report))
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()

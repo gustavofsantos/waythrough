@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waythrough status</title>
+<!--
+  The get_status MCP App. A host that supports MCP Apps renders this page in a
+  sandboxed frame beside the get_status tool result. It is self-contained on
+  purpose: no external script, style, font, or image, so it needs no network
+  permission and works under the strictest content security policy a host
+  applies.
+
+  It speaks JSON-RPC 2.0 to the host over postMessage: ui/initialize, then the
+  host sends the tool result as ui/notifications/tool-result, and a refresh is
+  a tools/call of get_status through the host. Every value from the report is
+  written with textContent, never as markup, since paths and error messages
+  come from the filesystem and from language servers.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f4f2;
+    --surface-1: #fcfcfb;
+    --border: #e2e1dc;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #77766f;
+    --accent: #2a78d6;
+    /* The status palette is fixed in both modes, and never carries meaning
+       alone: every use sits beside an icon and a word. */
+    --status-good: #0ca30c;
+    --status-warning: #fab219;
+    --status-critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-0: #121211;
+      --surface-1: #1a1a19;
+      --border: #33332f;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #9a998f;
+      --accent: #3987e5;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #121211;
+    --surface-1: #1a1a19;
+    --border: #33332f;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #9a998f;
+    --accent: #3987e5;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--surface-0);
+    color: var(--text-primary);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+  }
+  header { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  header .where { flex: 1 1 240px; min-width: 0; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+  .subtitle { color: var(--text-secondary); margin-top: 2px; }
+  .controls { display: flex; align-items: center; gap: 8px; color: var(--text-muted); }
+  button {
+    font: inherit; color: var(--text-primary); background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  label.toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; white-space: nowrap; }
+  .badge .icon {
+    display: inline-grid; place-items: center; width: 14px; height: 14px;
+    border-radius: 50%; color: #ffffff; font-size: 9px; line-height: 1;
+  }
+  .badge.healthy .icon { background: var(--status-good); }
+  .badge.degraded .icon { background: var(--status-warning); color: #0b0b0b; }
+  .badge.failing .icon { background: var(--status-critical); }
+  .badge.large { font-size: 14px; }
+  .badge.large .icon { width: 18px; height: 18px; font-size: 11px; }
+
+  .tiles {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px; margin: 14px 0;
+  }
+  .tile {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; min-width: 0;
+  }
+  .tile .label { color: var(--text-secondary); font-size: 12px; }
+  .tile .value { font-size: 18px; font-weight: 600; margin-top: 2px; }
+  .tile .detail { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+
+  .table-wrap {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 8px; overflow-x: auto;
+  }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  caption { text-align: left; padding: 8px 10px 0; font-weight: 600; }
+  th, td { padding: 6px 8px; text-align: left; white-space: nowrap; }
+  th { color: var(--text-secondary); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--border); }
+  td.number, th.number { text-align: right; }
+  tbody tr + tr td { border-top: 1px solid var(--border); }
+  td.name { font-weight: 600; }
+  td.root { color: var(--text-secondary); max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  .muted { color: var(--text-muted); }
+
+  .errors { margin-top: 12px; }
+  .errors h2 { font-size: 13px; margin: 0 0 6px; }
+  .errors li { margin-bottom: 4px; overflow-wrap: anywhere; }
+  .errors .when { color: var(--text-muted); }
+  ul { margin: 0; padding-left: 18px; }
+
+  .notice { color: var(--text-secondary); padding: 24px 0; }
+  .problem { color: var(--text-primary); border-left: 3px solid var(--status-critical); padding: 4px 10px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<main id="app">
+  <p class="notice" id="notice">Waiting for the status report…</p>
+</main>
+<script>
+"use strict";
+
+// Bounds on the page's own work. An open page polls at most this often and
+// for at most this long, and stops while hidden, so a forgotten tab costs
+// the daemon a bounded number of reports.
+const REFRESH_INTERVAL_MS = 5000;
+const AUTO_REFRESH_MAX = 120;
+const REQUEST_TIMEOUT_MS = 10000;
+const PROTOCOL_VERSION = "2026-01-26";
+const REPORT_FORMAT = 1;
+
+const host = window.parent;
+const pending = new Map();
+let nextRequestId = 1;
+let report = null;
+let receivedAt = 0;
+let autoRefresh = false;
+let autoRefreshCount = 0;
+let refreshTimer = 0;
+let refreshing = false;
+let lastProblem = "";
+let notice = "";
+
+// ---- Host protocol ----------------------------------------------------
+
+function send(message) {
+  host.postMessage(Object.assign({ jsonrpc: "2.0" }, message), "*");
+}
+
+function request(method, params) {
+  const id = nextRequestId++;
+  send({ id, method, params });
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(method + " got no answer within " + REQUEST_TIMEOUT_MS / 1000 + "s"));
+    }, REQUEST_TIMEOUT_MS);
+    pending.set(id, { resolve, reject, timer });
+  });
+}
+
+function notify(method, params) {
+  send({ method, params });
+}
+
+window.addEventListener("message", (event) => {
+  // Only the host frame speaks for the host.
+  if (event.source !== host) return;
+  const message = event.data;
+  if (!message || message.jsonrpc !== "2.0") return;
+
+  if (message.id !== undefined && message.method === undefined) {
+    const waiter = pending.get(message.id);
+    if (!waiter) return;
+    pending.delete(message.id);
+    clearTimeout(waiter.timer);
+    if (message.error) {
+      waiter.reject(new Error(message.error.message || "request failed"));
+    } else {
+      waiter.resolve(message.result);
+    }
+    return;
+  }
+
+  switch (message.method) {
+    case "ui/notifications/tool-result":
+      acceptToolResult(message.params);
+      return;
+    case "ui/notifications/host-context-changed":
+      applyHostContext(message.params);
+      return;
+    case "ui/resource-teardown":
+      stopAutoRefresh();
+      send({ id: message.id, result: {} });
+      return;
+    default:
+      // A request this page does not know still gets an answer, so the host
+      // never waits on it. A notification needs none.
+      if (message.id !== undefined) {
+        send({ id: message.id, error: { code: -32601, message: "method not found" } });
+      }
+  }
+});
+
+function applyHostContext(context) {
+  if (!context) return;
+  if (context.theme === "dark" || context.theme === "light") {
+    document.documentElement.dataset.theme = context.theme;
+  }
+}
+
+function acceptToolResult(result) {
+  if (!result) return;
+  if (result.isError) {
+    showProblem(textOf(result) || "get_status failed");
+    return;
+  }
+  let structured = result.structuredContent;
+  if (!structured) {
+    try { structured = JSON.parse(textOf(result)); } catch (error) { structured = null; }
+  }
+  const shapeProblem = reportShapeProblem(structured);
+  if (shapeProblem) {
+    showProblem("The status report could not be read: " + shapeProblem + ".");
+    return;
+  }
+  const previous = { report, receivedAt };
+  report = structured;
+  receivedAt = Date.now();
+  lastProblem = "";
+  if (!render()) {
+    // A report that passed the shape check and still failed to render keeps
+    // the last good one on screen rather than none.
+    report = previous.report;
+    receivedAt = previous.receivedAt;
+    showProblem("The status report could not be shown.");
+  }
+}
+
+// reportShapeProblem checks every field the page reads, so that a report
+// from another Waythrough version, or a host that mangles it, is named as
+// such rather than breaking the page halfway through drawing it.
+function reportShapeProblem(candidate) {
+  const isObject = (value) => value !== null && typeof value === "object";
+  if (!isObject(candidate)) return "it is not an object";
+  if (candidate.format !== REPORT_FORMAT) {
+    return "it is in format " + candidate.format + ", and this page reads format " + REPORT_FORMAT;
+  }
+  if (!isObject(candidate.runtime)) return "it has no runtime figures";
+  if (candidate.sessions !== undefined && !isObject(candidate.sessions)) return "its sessions are malformed";
+  if (!Array.isArray(candidate.language_servers)) return "it lists no language servers";
+  for (const server of candidate.language_servers) {
+    if (!isObject(server) || !isObject(server.requests)) return "a language server entry is malformed";
+  }
+  return "";
+}
+
+function textOf(result) {
+  const blocks = Array.isArray(result.content) ? result.content : [];
+  const first = blocks.find((block) => block && block.type === "text");
+  return first ? String(first.text) : "";
+}
+
+// refresh keeps one call in flight. A click or a tick while one runs is
+// dropped rather than queued, so answers can never arrive out of order and
+// a fast clicker costs the server one report at a time.
+async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  render();
+  try {
+    acceptToolResult(await request("tools/call", { name: "get_status", arguments: {} }));
+  } catch (error) {
+    showProblem("Refresh failed: " + error.message);
+  } finally {
+    refreshing = false;
+    render();
+  }
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  notice = "";
+  autoRefresh = true;
+  autoRefreshCount = 0;
+  refreshTimer = setInterval(() => {
+    if (document.hidden) return;
+    autoRefreshCount++;
+    if (autoRefreshCount > AUTO_REFRESH_MAX) {
+      stopAutoRefresh();
+      notice = "Automatic refresh stopped after " +
+        (AUTO_REFRESH_MAX * REFRESH_INTERVAL_MS) / 60000 + " minutes. Turn it on again to resume.";
+      render();
+      return;
+    }
+    refresh();
+  }, REFRESH_INTERVAL_MS);
+}
+
+function stopAutoRefresh() {
+  autoRefresh = false;
+  clearInterval(refreshTimer);
+  refreshTimer = 0;
+}
+
+function showProblem(text) {
+  lastProblem = text;
+  render();
+}
+
+// ---- Rendering --------------------------------------------------------
+
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+const HEALTH_ICONS = { healthy: "✓", degraded: "!", failing: "✕" };
+
+function healthBadge(health, large) {
+  const known = Object.prototype.hasOwnProperty.call(HEALTH_ICONS, health) ? health : "degraded";
+  const badge = element("span", "badge " + known + (large ? " large" : ""));
+  const icon = element("span", "icon", HEALTH_ICONS[known]);
+  icon.setAttribute("aria-hidden", "true");
+  badge.append(icon, element("span", "", health || "unknown"));
+  return badge;
+}
+
+function tile(label, value, detail) {
+  const node = element("div", "tile");
+  node.append(element("div", "label", label), element("div", "value", value));
+  if (detail) node.append(element("div", "detail", detail));
+  return node;
+}
+
+// render draws the page from the current report and reports whether it
+// could. The new content is built in full before it replaces the old, so a
+// failure halfway leaves the page as it was rather than blank.
+function render() {
+  const app = document.getElementById("app");
+  let children;
+  try {
+    children = report ? renderReport() : [element("p", "notice", "Waiting for the status report…")];
+  } catch (error) {
+    return false;
+  }
+  if (notice) children.push(element("p", "notice", notice));
+  if (lastProblem) children.push(element("p", "problem", lastProblem));
+  app.replaceChildren(...children);
+  reportSize();
+  return true;
+}
+
+function renderReport() {
+  const children = [renderHeader(), renderTiles(), renderServers()];
+  const errors = renderErrors();
+  if (errors) children.push(errors);
+  return children;
+}
+
+function renderHeader() {
+  const header = element("header");
+  const where = element("div", "where");
+  where.append(element("h1", "", report.root || "Waythrough"));
+  const mode = report.mode === "shared" ? "shared daemon" : "standalone serve";
+  where.append(element("div", "subtitle",
+    mode + " · pid " + report.pid + " · waythrough " + (report.version || "unknown") +
+    " · up " + formatDuration(Date.now() - Date.parse(report.started_at))));
+
+  const controls = element("div", "controls");
+  const updated = element("span", "", "updated " + new Date(receivedAt).toLocaleTimeString());
+  const button = element("button", "", refreshing ? "Refreshing…" : "Refresh");
+  button.type = "button";
+  button.disabled = refreshing;
+  button.addEventListener("click", refresh);
+  const toggle = element("label", "toggle");
+  const checkbox = element("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = autoRefresh;
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) { startAutoRefresh(); } else { stopAutoRefresh(); }
+  });
+  toggle.append(checkbox, element("span", "", "every " + REFRESH_INTERVAL_MS / 1000 + "s"));
+  controls.append(updated, button, toggle);
+
+  header.append(healthBadge(report.health, true), where, controls);
+  return header;
+}
+
+function renderTiles() {
+  const tiles = element("section", "tiles");
+  tiles.setAttribute("aria-label", "Summary");
+  const servers = report.language_servers;
+  const running = servers.filter((server) => server.status !== "idle");
+  const ready = servers.filter((server) => server.status === "ready").length;
+  tiles.append(tile("Servers ready", ready + " of " + running.length,
+    servers.length - running.length > 0 ? (servers.length - running.length) + " not started" : ""));
+
+  let recent = 0;
+  let recentFailed = 0;
+  for (const server of servers) {
+    recent += server.requests.recent_count;
+    recentFailed += server.requests.recent_failed;
+  }
+  tiles.append(tile("Recent failures", recentFailed + " of " + recent, "last 64 requests per server"));
+
+  const sessions = report.sessions;
+  if (sessions) {
+    let detail = sessions.state;
+    if (sessions.drain_at) {
+      detail += ", drains in " + formatDuration(Date.parse(sessions.drain_at) - Date.now());
+    }
+    tiles.append(tile("Sessions", sessions.active + " of " + sessions.max, detail));
+  }
+  const runtime = report.runtime;
+  tiles.append(tile("Waythrough memory", formatBytes(runtime.heap_bytes) + " heap",
+    runtime.goroutines + " goroutines, " + formatBytes(runtime.total_bytes) + " mapped"));
+  return tiles;
+}
+
+// The columns that decide health come first, so a narrow frame that
+// scrolls the table still shows why a server is degraded.
+const COLUMNS = [
+  ["Server", "", ""], ["Root", "", ""], ["Health", "", ""], ["Status", "", ""],
+  ["Failed", "number", "Failures among the last 64 requests"],
+  ["Crashes", "number", "Crashes in the restart window, against the restart limit"],
+  ["p50", "number", "Median latency of the last 64 requests"],
+  ["p95", "number", ""], ["Max", "number", ""],
+  ["Memory", "number", "Resident memory; shown on Linux only"],
+  ["Startup", "number", "Time to become ready"], ["Docs", "number", "Open documents"],
+  ["Requests", "number", "Requests since start"], ["Up", "number", ""], ["PID", "number", ""],
+];
+
+function renderServers() {
+  const wrap = element("div", "table-wrap");
+  const table = element("table");
+  table.append(element("caption", "", "Language servers"));
+  const head = element("tr");
+  for (const [name, kind, description] of COLUMNS) {
+    const cell = element("th", kind, name);
+    cell.scope = "col";
+    if (description) cell.title = description;
+    head.append(cell);
+  }
+  const thead = element("thead");
+  thead.append(head);
+  table.append(thead);
+  const body = element("tbody");
+  for (const server of report.language_servers) {
+    body.append(serverRow(server));
+  }
+  table.append(body);
+  wrap.append(table);
+  return wrap;
+}
+
+function serverRow(server) {
+  const row = element("tr");
+  const requests = server.requests;
+  const idle = server.status === "idle";
+  const cells = [
+    [server.name, "name"],
+    [displayRoot(server.root), "root"],
+    [healthBadge(server.health, false), ""],
+    [server.status, ""],
+    [requests.recent_failed + " / " + requests.recent_count, "number"],
+    [server.crashes_in_window + " / " + server.crash_limit, "number"],
+    [latency(requests, requests.recent_duration_ms_p50), "number"],
+    [latency(requests, requests.recent_duration_ms_p95), "number"],
+    [latency(requests, requests.recent_duration_ms_max), "number"],
+    [server.resident_bytes ? formatBytes(server.resident_bytes) : "–", "number"],
+    [server.startup_ms ? formatDuration(server.startup_ms) : "–", "number"],
+    [idle ? "–" : server.open_documents, "number"],
+    [requests.total, "number"],
+    [server.pid ? formatDuration(Date.now() - Date.parse(server.attempt_started_at)) : "–", "number"],
+    [server.pid || "–", "number"],
+  ];
+  for (const [value, kind] of cells) {
+    const cell = element("td", kind);
+    if (value instanceof Node) { cell.append(value); } else { cell.textContent = String(value); }
+    if (kind === "root" && server.root) cell.title = server.root;
+    row.append(cell);
+  }
+  if (idle) row.classList.add("muted");
+  return row;
+}
+
+function renderErrors() {
+  const failing = report.language_servers.filter((server) => server.requests.last_error);
+  if (failing.length === 0) return null;
+  const section = element("section", "errors");
+  section.append(element("h2", "", "Last errors"));
+  const list = element("ul");
+  for (const server of failing) {
+    const item = element("li");
+    item.append(
+      element("strong", "", server.name),
+      element("span", "when", " " + formatDuration(Date.now() - Date.parse(server.requests.last_error_at)) + " ago: "),
+      element("span", "", server.requests.last_error));
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
+
+function latency(requests, milliseconds) {
+  return requests.recent_count === 0 ? "–" : formatDuration(milliseconds);
+}
+
+function displayRoot(root) {
+  if (!root) return "–";
+  const base = report.root || "";
+  if (root === base) return ".";
+  if (base && root.startsWith(base + "/")) return root.slice(base.length + 1);
+  return root;
+}
+
+function formatDuration(milliseconds) {
+  const value = Math.max(0, Number(milliseconds) || 0);
+  if (value < 1000) return Math.round(value) + "ms";
+  const seconds = value / 1000;
+  if (seconds < 60) return seconds.toFixed(1) + "s";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + "m" + String(Math.floor(seconds % 60)).padStart(2, "0") + "s";
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + "h" + String(minutes % 60).padStart(2, "0") + "m";
+  return Math.floor(hours / 24) + "d" + String(hours % 24).padStart(2, "0") + "h";
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return value + " B";
+  if (value < 1024 ** 2) return (value / 1024).toFixed(1) + " KiB";
+  if (value < 1024 ** 3) return (value / 1024 ** 2).toFixed(1) + " MiB";
+  return (value / 1024 ** 3).toFixed(1) + " GiB";
+}
+
+// The host sizes the frame from what the page reports, so every render says
+// how tall it now is.
+function reportSize() {
+  const root = document.documentElement;
+  notify("ui/notifications/size-changed", {
+    width: Math.ceil(root.scrollWidth),
+    height: Math.ceil(root.scrollHeight),
+  });
+}
+
+// ---- Start ------------------------------------------------------------
+
+async function start() {
+  if (host === window) {
+    document.getElementById("notice").textContent =
+      "This page shows the get_status tool result inside an MCP host.";
+    return;
+  }
+  try {
+    const result = await request("ui/initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      appInfo: { name: "waythrough-status", version: "1" },
+      appCapabilities: {},
+    });
+    applyHostContext(result && result.hostContext);
+    notify("ui/notifications/initialized", {});
+  } catch (error) {
+    showProblem("The host did not answer ui/initialize: " + error.message);
+  }
+  reportSize();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && report) render();
+});
+start();
+</script>
+</body>
+</html>

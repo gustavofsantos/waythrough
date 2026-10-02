@@ -1,0 +1,9 @@
+{
+  "name": "waythrough",
+  "version": "0.1.0",
+  "description": "Navigate code through the Waythrough MCP tools: definitions, references, callers, renames, and diagnostics from the language server, not text search.",
+  "author": {
+    "name": "Gustavo Santos"
+  },
+  "repository": "https://github.com/gustavofsantos/waythrough"
+}

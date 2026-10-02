@@ -623,10 +623,12 @@ func (m *Manager) runServer(ctx context.Context, proc *serverProcess) {
 		// A stop this Manager asked for is not a crash, so it leaves the
 		// budget holding exactly the crashes that came before it.
 		if proc.takeRestartRequest() {
+			proc.counters.recordRequestedRestart()
 			continue
 		}
 
 		exits = withinWindow(append(exits, time.Now()), m.restartWindow)
+		proc.counters.recordCrashes(exits)
 		if len(exits) <= m.restartLimit {
 			continue
 		}
@@ -638,6 +640,7 @@ func (m *Manager) runServer(ctx context.Context, proc *serverProcess) {
 		// A restart of a server that already gave up is a fresh start, so
 		// the crashes that spent the budget stop counting against it.
 		exits = nil
+		proc.counters.clearCrashes()
 	}
 }
 
@@ -822,8 +825,10 @@ func (m *Manager) Status(name string) (Status, error) {
 // be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) Definition(
 	ctx context.Context, name, file string, line, column int,
-) ([]Location, error) {
+) (_ []Location, err error) {
+	started := time.Now()
 	proc, path, err := m.prepare(ctx, name, file)
+	defer func() { proc.recordRequest(started, err) }()
 	if err != nil {
 		return nil, err
 	}
@@ -843,8 +848,10 @@ func (m *Manager) Definition(
 // be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) References(
 	ctx context.Context, name, file string, line, column int,
-) ([]Location, error) {
+) (_ []Location, err error) {
+	started := time.Now()
 	proc, path, err := m.prepare(ctx, name, file)
+	defer func() { proc.recordRequest(started, err) }()
 	if err != nil {
 		return nil, err
 	}
@@ -871,8 +878,10 @@ func (m *Manager) References(
 // Rename does not write the edit to disk; the caller applies it.
 func (m *Manager) Rename(
 	ctx context.Context, name, file string, line, column int, newName string,
-) ([]Edit, error) {
+) (_ []Edit, err error) {
+	started := time.Now()
 	proc, path, err := m.prepare(ctx, name, file)
+	defer func() { proc.recordRequest(started, err) }()
 	if err != nil {
 		return nil, err
 	}
@@ -893,8 +902,10 @@ func (m *Manager) Rename(
 // may be absolute, or relative to Manager's root as resolvePath allows.
 func (m *Manager) SignatureHelp(
 	ctx context.Context, name, file string, line, column int,
-) (SignatureHelp, error) {
+) (_ SignatureHelp, err error) {
+	started := time.Now()
 	proc, path, err := m.prepare(ctx, name, file)
+	defer func() { proc.recordRequest(started, err) }()
 	if err != nil {
 		return SignatureHelp{}, err
 	}
@@ -913,7 +924,8 @@ func (m *Manager) SignatureHelp(
 // verbatim because its Data field belongs to the language server.
 func (m *Manager) CallHierarchy(
 	ctx context.Context, name, file string, line, column int, direction CallDirection,
-) ([]CallHierarchy, error) {
+) (_ []CallHierarchy, err error) {
+	started := time.Now()
 	switch direction {
 	case CallDirectionIncoming, CallDirectionOutgoing:
 	default:
@@ -926,6 +938,7 @@ func (m *Manager) CallHierarchy(
 		return nil, err
 	}
 	proc, err := m.ensureSupervisor(ctx, name, filepath.Dir(path))
+	defer func() { proc.recordRequest(started, err) }()
 	if err != nil {
 		return nil, err
 	}
@@ -1118,8 +1131,12 @@ func requestDirectedCall(
 // Only a server that advertised pull diagnostics at its handshake is asked.
 // One that reports diagnostics by pushing them instead fails here, since
 // Waythrough keeps no record of what a server pushed.
-func (m *Manager) Diagnostics(ctx context.Context, name, file string) ([]Diagnostic, error) {
+func (m *Manager) Diagnostics(
+	ctx context.Context, name, file string,
+) (_ []Diagnostic, err error) {
+	started := time.Now()
 	proc, path, err := m.prepare(ctx, name, file)
+	defer func() { proc.recordRequest(started, err) }()
 	if err != nil {
 		return nil, err
 	}
@@ -1139,6 +1156,10 @@ func (m *Manager) Diagnostics(ctx context.Context, name, file string) ([]Diagnos
 // prepare resolves file, waits for name's server to be ready, and syncs
 // file's current on-disk content to it — the setup every LSP position
 // request needs before it can ask the server anything.
+//
+// Once it has chosen an instance, it returns that instance even with an
+// error, so the caller can count the failure against the server it reached.
+// The instance is nil only when the request failed before reaching one.
 func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProcess, string, error) {
 	path, err := m.resolvePath(ctx, file)
 	if err != nil {
@@ -1149,18 +1170,18 @@ func (m *Manager) prepare(ctx context.Context, name, file string) (*serverProces
 		return nil, "", err
 	}
 	if err := m.waitReady(ctx, proc, m.readinessTimeout, 0); err != nil {
-		return nil, "", err
+		return proc, "", err
 	}
 
 	// A ready server has completed a handshake, so it holds a connection.
 	// Checking that here keeps a readiness signal that escaped its own
 	// attempt from being read as an invitation to talk to nothing.
 	if proc.currentServer() == nil {
-		return nil, "", fmt.Errorf("language server %q reported ready with no connection", name)
+		return proc, "", fmt.Errorf("language server %q reported ready with no connection", name)
 	}
 
 	if err := proc.syncFile(ctx, path); err != nil {
-		return nil, "", fmt.Errorf("sync %s: %w", path, err)
+		return proc, "", fmt.Errorf("sync %s: %w", path, err)
 	}
 	return proc, path, nil
 }
@@ -1762,6 +1783,8 @@ type serverProcess struct {
 	logger     *slog.Logger
 	restartCh  chan struct{}
 	stoppingCh chan struct{}
+	// counters outlives every attempt and has its own lock.
+	counters instanceCounters
 
 	mu sync.Mutex
 	// generation counts the attempts this server has made. The process of a
@@ -1777,15 +1800,19 @@ type serverProcess struct {
 	conn         jsonrpc2.Conn
 	capabilities protocol.ServerCapabilities
 	status       Status
-	readyCh      chan struct{}
-	retiredCh    chan struct{}
-	exitedCh     chan struct{}
-	active       map[string]bool
-	everSawToken bool
-	retiring     bool
-	shuttingDown bool
-	supervised   chan struct{}
-	openFiles    map[string]openFile
+	// attemptStartedAt is when beginAttempt claimed this attempt, and
+	// readyAt is when it passed its readiness gate, zero until then.
+	attemptStartedAt time.Time
+	readyAt          time.Time
+	readyCh          chan struct{}
+	retiredCh        chan struct{}
+	exitedCh         chan struct{}
+	active           map[string]bool
+	everSawToken     bool
+	retiring         bool
+	shuttingDown     bool
+	supervised       chan struct{}
+	openFiles        map[string]openFile
 	// syncSlot holds one token while a file sync of this attempt runs. Each
 	// attempt gets its own, so a sync stuck writing to a retired process
 	// never delays the replacement. It is a channel rather than a mutex so
@@ -1847,7 +1874,7 @@ func (p *serverProcess) requirePullDiagnostics(name string) error {
 		return fmt.Errorf("language server %q restarted while this call was in flight", name)
 	}
 	if p.capabilities.DiagnosticProvider == nil {
-		return fmt.Errorf("language server %q does not support pull diagnostics", name)
+		return refused(fmt.Errorf("language server %q does not support pull diagnostics", name))
 	}
 	return nil
 }
@@ -1875,8 +1902,8 @@ func (p *serverProcess) callHierarchyAttempt(name string) (serverAttempt, error)
 		supported = provider != nil
 	}
 	if !supported {
-		return serverAttempt{}, fmt.Errorf(
-			"language server %q does not support call hierarchy", name)
+		return serverAttempt{}, refused(fmt.Errorf(
+			"language server %q does not support call hierarchy", name))
 	}
 	return serverAttempt{
 		generation: p.generation,
@@ -1935,14 +1962,14 @@ func (p *serverProcess) syncFileOnAttempt(
 
 	content, err := readSourceFile(ctx, path)
 	if err != nil {
-		return fmt.Errorf("read file: %w", err)
+		return refused(fmt.Errorf("read file: %w", err))
 	}
 	text := string(content)
 
 	ext := filepath.Ext(path)
 	languageID, ok := p.entry.Filetypes[ext]
 	if !ok {
-		return fmt.Errorf("no languageId configured for extension %q", ext)
+		return refused(fmt.Errorf("no languageId configured for extension %q", ext))
 	}
 
 	p.mu.Lock()
@@ -2150,6 +2177,8 @@ func (p *serverProcess) beginAttempt() (int, bool) {
 	p.syncSlot = make(chan struct{}, 1)
 	p.capabilities = protocol.ServerCapabilities{}
 	p.status = StatusStarting
+	p.attemptStartedAt = time.Now()
+	p.readyAt = time.Time{}
 
 	return p.generation, true
 }
@@ -2346,6 +2375,7 @@ func (p *serverProcess) markReady(generation int) {
 	stale := generation != p.generation || p.status != StatusStarting
 	if !stale {
 		p.status = StatusReady
+		p.readyAt = time.Now()
 		close(p.readyCh)
 	}
 	p.mu.Unlock()

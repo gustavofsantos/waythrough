@@ -5,6 +5,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 type admission int
@@ -28,6 +30,13 @@ type registry struct {
 	mu       sync.Mutex
 	sessions map[*net.UnixConn]struct{}
 	draining bool
+	// The counters below only rise. They are for the status report, and no
+	// decision reads them.
+	admittedTotal uint64
+	refusedBusy   uint64
+	refusedPeer   uint64
+	// drainAt is when the armed timer fires, and zero when none is armed.
+	drainAt time.Time
 	// timerGeneration rises on every arm and stop. A timer whose callback
 	// carries an older generation was superseded and does nothing.
 	timerGeneration uint64
@@ -51,9 +60,11 @@ func (r *registry) admit(conn *net.UnixConn) admission {
 		return admissionDraining
 	}
 	if len(r.sessions) >= MaxSessions {
+		r.refusedBusy++
 		return admissionBusy
 	}
 	r.sessions[conn] = struct{}{}
+	r.admittedTotal++
 	r.stopTimerLocked()
 	r.logger.Debug("daemon session started", slog.Int("sessions", len(r.sessions)))
 	return admissionAccepted
@@ -78,11 +89,13 @@ func (r *registry) armTimer(duration time.Duration) {
 func (r *registry) armTimerLocked(duration time.Duration) {
 	r.stopTimerLocked()
 	generation := r.timerGeneration
+	r.drainAt = time.Now().Add(duration)
 	r.timer = time.AfterFunc(duration, func() { r.expire(generation) })
 }
 
 func (r *registry) stopTimerLocked() {
 	r.timerGeneration++
+	r.drainAt = time.Time{}
 	if r.timer != nil {
 		r.timer.Stop()
 		r.timer = nil
@@ -127,4 +140,38 @@ func (r *registry) isDraining() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.draining
+}
+
+// refusePeer counts a connection from another user, which never reaches
+// admit.
+func (r *registry) refusePeer() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refusedPeer++
+}
+
+// stats reads the session figures in one hold of the lock, so they agree
+// with one another.
+func (r *registry) stats() status.SessionStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stats := status.SessionStats{
+		Active:        len(r.sessions),
+		Max:           MaxSessions,
+		AdmittedTotal: r.admittedTotal,
+		RefusedBusy:   r.refusedBusy,
+		RefusedPeer:   r.refusedPeer,
+		DrainAt:       r.drainAt,
+	}
+	switch {
+	case r.draining:
+		stats.State = status.StateDraining
+	case len(r.sessions) > 0:
+		stats.State = status.StateServing
+	case r.admittedTotal == 0:
+		stats.State = status.StateStarting
+	default:
+		stats.State = status.StateLingering
+	}
+	return stats
 }

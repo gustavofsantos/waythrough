@@ -73,7 +73,7 @@ repositories without adding a repository-owned file.
 
 ## Status
 
-This project is in early setup. It has six MCP tools. Tests run
+This project is in early setup. It has eight MCP tools. Tests run
 them against a test language server, not against a real one yet.
 
 ## Install
@@ -213,6 +213,9 @@ target to list the rest, or see
    and nothing else. Without `--write` the command prints it to stdout
    instead, to read first or to place by hand.
 
+   In Claude Code, you can install the [plugin](#claude-code-plugin)
+   instead.
+
 5. Customize `~/.waythrough.yaml` when you need a different server, command,
    arguments, environment, readiness gate, root policy, or file mapping. For
    example, you can customize how gopls starts:
@@ -280,6 +283,35 @@ target to list the rest, or see
    `waythrough validate` checks the same `~/.waythrough.yaml` file that
    `serve` reads. Empty files and unknown configuration fields are rejected.
 
+## Claude Code plugin
+
+In Claude Code, a plugin can take the place of the instructions block in
+step 4. It adds a `waythrough` skill. The skill tells Claude which tool
+answers which question, how to give a position, and what to do when a
+call fails or is slow. It also lets Claude call the eight Waythrough
+tools without a permission prompt each time.
+
+[Install the binary](#install) and create your configuration, then
+connect the MCP server and install the plugin:
+
+```sh
+claude mcp add --scope user waythrough -- waythrough serve --shared
+```
+
+```
+/plugin marketplace add gustavofsantos/waythrough
+/plugin install waythrough@waythrough
+```
+
+Claude loads the skill when a task needs to navigate code. You can also
+run `/waythrough:waythrough`. The skill expects the MCP server under the
+name `waythrough`, as the command above registers it, because Claude
+Code names the tools after the server.
+
+The plugin and the instructions block steer the agent in the same way,
+so you need only one of them. A spec checks that the skill names exactly
+the tools the server registers.
+
 ## Share language servers across sessions
 
 Each `serve` starts its own language servers. When you run several
@@ -342,6 +374,55 @@ same gap.
 
 `--shared` works on Linux and macOS.
 
+### Check on running daemons
+
+Run `waythrough status` from any directory to see every daemon that runs
+for your user. Your agent sees the same report for its own workspace
+through the `get_status` tool (see [Tools](#tools)):
+
+```text
+/home/me/project  [healthy]
+  daemon    pid 31774, waythrough v0.2.0, up 2h14m, serving
+  sessions  2 active of 64, 9 since start, 0 refused
+  runtime   31 goroutines, 2.4 MiB heap, 18.1 MiB total
+  log       /run/user/1000/waythrough/d379a940b7f939082ae3fa5615750141.log
+
+  SERVER  ROOT  STATUS  HEALTH   PID    UP     STARTUP  RSS      DOCS  REQUESTS  FAILED  RECENT FAILED  P50   P95    MAX   CRASHES
+  gopls   .     ready   healthy  31785  2h13m  6.1s     812 MiB  14    1520      3       0/64           38ms  310ms  1.2s  0/3
+```
+
+For each daemon, the report shows its workspace, its state, and its
+sessions. For each language server, it shows the root the server
+indexes, its process and resident memory, how long it took to become
+ready, and the files it has open. It also shows the requests the server
+served and how many failed. The recent figures cover the last 64
+requests, so they show a server that worked for hours and fails now.
+A request that Waythrough refuses before it asks the server does not
+count as a failure. Examples are a file it cannot read, or diagnostics
+from a server that does not offer them. The JSON counts these as
+`refused`.
+CRASHES shows the exits in the last minute against the restart limit.
+A server that is not used yet shows as `idle`. Resident memory shows
+only on Linux.
+
+Each daemon and each server gets one health word:
+
+- `healthy`: nothing below applies.
+- `degraded`: the server crashed in the last minute, or it is still
+  starting after 30 seconds, or at least one in four of its recent
+  requests failed. A daemon at its session limit is also degraded.
+- `failing`: the server crashed more often than the restart limit
+  allows, and it answers nothing until `restart_server` restarts it.
+
+A daemon is as healthy as its least healthy server. The last error of
+each server shows under the table.
+
+`waythrough status --json` prints the same reports as JSON, for a
+script or a dashboard. Read the status as often as you like: it never
+counts as a session, so it never keeps an idle daemon running. A
+killed daemon leaves its sockets behind. When no daemon holds the
+key's lock, `status` removes those sockets and says so.
+
 ## Tools
 
 Waythrough exposes these MCP tools to a connected coding agent:
@@ -383,6 +464,24 @@ Waythrough exposes these MCP tools to a connected coding agent:
   With `--shared`, the restart reaches every session in the
   workspace. A call those sessions have in flight fails and says the
   server restarted.
+- `get_status` — report the health of the language servers behind
+  these tools. It takes no arguments and returns the same report as
+  `waythrough status --json`, for the current process only. The
+  report covers which servers run and for which root, whether each
+  is ready, still starting, degraded, or failing, its recent latency
+  and failures, and its last error. With `--shared`, it also reports
+  the sessions that share the servers. An agent uses it when a call
+  fails or is slow, to decide whether to wait or to call
+  `restart_server`.
+
+  `get_status` also comes with a page. A host that supports the
+  [MCP Apps](https://modelcontextprotocol.io/extensions/apps)
+  extension, such as Claude, shows the page beside the result: the
+  health of each server, summary tiles, a table of servers, and the
+  last errors. It also has a Refresh button and an optional refresh
+  every 5 seconds. Automatic refresh stops after 10 minutes, and
+  pauses while the page is hidden. The page loads nothing from the
+  network. A host without MCP Apps shows the report as data.
 
 File-based tools accept regular source files up to 16 MiB. Waythrough rejects
 larger files and non-regular paths before it sends content to a language server.

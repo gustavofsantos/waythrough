@@ -16,6 +16,7 @@ import (
 	"github.com/gustavofsantos/waythrough/internal/config"
 	"github.com/gustavofsantos/waythrough/internal/editor"
 	"github.com/gustavofsantos/waythrough/internal/lsp"
+	"github.com/gustavofsantos/waythrough/internal/status"
 )
 
 type toolLocation struct {
@@ -48,7 +49,8 @@ func connectLogging(
 ) *mcp.ClientSession {
 	Expect(manager.Start(ctx)).To(Succeed())
 
-	server := editor.New(manager, cfg, logger)
+	source := status.Source{Root: "/workspace", LanguageServers: manager.Stats}
+	server := editor.New(manager, cfg, logger, source.Report)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 
 	_, err := server.Connect(ctx, serverTransport, nil)

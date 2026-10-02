@@ -1,0 +1,14 @@
+{
+  "name": "waythrough",
+  "description": "Claude Code plugin for Waythrough, which gives coding agents your project's language servers over MCP.",
+  "owner": {
+    "name": "Gustavo Santos"
+  },
+  "plugins": [
+    {
+      "name": "waythrough",
+      "source": "./",
+      "description": "Navigate code through the Waythrough MCP tools: definitions, references, callers, renames, and diagnostics from the language server, not text search."
+    }
+  ]
+}
