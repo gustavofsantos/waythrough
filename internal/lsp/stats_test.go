@@ -68,9 +68,9 @@ var _ = Describe("Manager.Stats", func() {
 	})
 
 	It("counts a failed request and keeps its message", func() {
-		// The fake does not advertise pull diagnostics, so the request fails
-		// after it has reached the instance.
-		manager, file := fakeManager(ctx, "greet()")
+		// The fake answers diagnostics with a payload that is no report, so
+		// the server itself is what failed.
+		manager, file := fakeManager(ctx, "greet()", "-pull-diagnostics", "-diagnostics=42")
 		_, err := manager.Diagnostics(ctx, "fake", file)
 		Expect(err).To(HaveOccurred())
 
@@ -80,6 +80,25 @@ var _ = Describe("Manager.Stats", func() {
 		Expect(requests.RecentFailed).To(Equal(1))
 		Expect(requests.LastError).To(Equal(err.Error()))
 		Expect(requests.LastErrorAt).To(BeTemporally("~", time.Now(), 10*time.Second))
+	})
+
+	// A request the server could never answer, refused on every call, must
+	// not make a working server look degraded.
+	It("counts a request refused for the caller's own reason apart from failures", func() {
+		manager, file := fakeManager(ctx, "greet()")
+		for range 8 {
+			_, err := manager.Diagnostics(ctx, "fake", file)
+			Expect(err).To(MatchError(ContainSubstring("does not support pull diagnostics")))
+		}
+		_, err := manager.Definition(ctx, "fake", file+".missing.fake", 1, 1)
+		Expect(err).To(MatchError(ContainSubstring("read file")))
+
+		stats := onlyStats(manager)
+		Expect(stats.Requests.Total).To(Equal(uint64(9)))
+		Expect(stats.Requests.Refused).To(Equal(uint64(9)))
+		Expect(stats.Requests.Failed).To(BeZero())
+		Expect(stats.Requests.RecentCount).To(BeZero())
+		Expect(stats.Health).To(Equal(lsp.HealthHealthy))
 	})
 
 	It("does not count a request that failed before it reached any server", func() {

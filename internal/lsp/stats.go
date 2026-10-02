@@ -98,11 +98,16 @@ type InstanceStats struct {
 // so it includes waiting for readiness and syncing the file, which is what
 // the agent waited for.
 type RequestStats struct {
+	// Total counts every request, the canceled and refused ones included.
 	Total  uint64 `json:"total"`
 	Failed uint64 `json:"failed"`
-	// Canceled counts the requests whose caller gave up first. They say
-	// nothing about the server, so they are in no other figure.
+	// Canceled counts the requests whose caller gave up first, and Refused
+	// the ones Waythrough refused before asking the server, such as for a
+	// file it cannot read or a capability the server lacks. Neither says
+	// anything about the server's health, so neither is in Failed or in
+	// the recent figures.
 	Canceled uint64 `json:"canceled"`
+	Refused  uint64 `json:"refused"`
 	// The recent figures cover the latest RecentCount requests, at most
 	// recentRequestsMax, canceled ones excluded.
 	RecentCount                   int   `json:"recent_count"`
@@ -130,6 +135,7 @@ type instanceCounters struct {
 	requestsTotal    uint64
 	requestsFailed   uint64
 	requestsCanceled uint64
+	requestsRefused  uint64
 	// recent is a ring: recentNext is the slot the next request takes, and
 	// recentCount stops growing at recentRequestsMax.
 	recent      [recentRequestsMax]requestSample
@@ -167,7 +173,9 @@ func (c *instanceCounters) recordRequestedRestart() {
 
 func (c *instanceCounters) recordRequest(duration time.Duration, err error) {
 	canceled := errors.Is(err, context.Canceled)
-	failed := err != nil && !canceled
+	var refusal refusedError
+	wasRefused := !canceled && errors.As(err, &refusal)
+	failed := err != nil && !canceled && !wasRefused
 	// Built before the lock, so the hold stays a few plain stores.
 	var message string
 	if failed {
@@ -179,6 +187,10 @@ func (c *instanceCounters) recordRequest(duration time.Duration, err error) {
 	c.requestsTotal++
 	if canceled {
 		c.requestsCanceled++
+		return
+	}
+	if wasRefused {
+		c.requestsRefused++
 		return
 	}
 
@@ -213,6 +225,7 @@ func (c *instanceCounters) fill(stats *InstanceStats, now time.Time, window time
 	requests.Total = c.requestsTotal
 	requests.Failed = c.requestsFailed
 	requests.Canceled = c.requestsCanceled
+	requests.Refused = c.requestsRefused
 	requests.LastError = c.lastError
 	requests.LastErrorAt = c.lastErrorAt
 	requests.RecentCount = c.recentCount
@@ -359,6 +372,18 @@ func isClosed(channel <-chan struct{}) bool {
 		return false
 	}
 }
+
+// refusedError marks a request Waythrough refused before asking the
+// server, for a reason of the caller's own: a file it cannot read, or a
+// capability the server never offered. Such a refusal repeats on every
+// call that makes it, so counting it as a failure would call a working
+// server degraded. It keeps the message it wraps unchanged.
+type refusedError struct{ err error }
+
+func (e refusedError) Error() string { return e.err.Error() }
+func (e refusedError) Unwrap() error { return e.err }
+
+func refused(err error) error { return refusedError{err: err} }
 
 // recordRequest counts one tool request routed to proc. A nil proc means
 // the request failed before any instance was chosen, such as for a path

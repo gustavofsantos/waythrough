@@ -31,8 +31,9 @@ const (
 	// StatusFormat is the version of Report's JSON shape. A reader refuses
 	// a report in any other format rather than misread it.
 	StatusFormat = 1
-	// StatusReportBytesMax bounds one report. The largest real one, with
-	// every configured server at its root limit, is a few tens of kilobytes.
+	// StatusReportBytesMax bounds one report, its newline included. The
+	// largest real one, with every configured server at its root limit, is
+	// a few tens of kilobytes.
 	StatusReportBytesMax = 1 << 20
 	// statusConnectionsMax bounds the status connections served at once. A
 	// connection past it is closed unanswered, so a reader in a tight loop
@@ -125,6 +126,7 @@ func answerStatus(conn *net.UnixConn, sessions *registry, options Options) {
 		options.Logger.Warn("daemon status report failed", slog.String("error", err.Error()))
 		return
 	}
+	data = append(data, '\n')
 	if len(data) > StatusReportBytesMax {
 		options.Logger.Warn("daemon status report exceeds its limit",
 			slog.Int("bytes", len(data)), slog.Int("limit_bytes", StatusReportBytesMax))
@@ -133,7 +135,7 @@ func answerStatus(conn *net.UnixConn, sessions *registry, options Options) {
 	if err := conn.SetWriteDeadline(time.Now().Add(statusWriteTimeout)); err != nil {
 		return
 	}
-	if _, err := conn.Write(append(data, '\n')); err != nil {
+	if _, err := conn.Write(data); err != nil {
 		options.Logger.Debug("daemon status write failed", slog.String("error", err.Error()))
 	}
 }
@@ -225,8 +227,9 @@ func ReadStatus(path string, deadline time.Time) (Report, error) {
 	}
 
 	// The newline ends the report, so the read does not depend on the
-	// daemon closing the connection. One byte past the limit is what tells
-	// a report at the limit from one over it.
+	// daemon closing the connection. The limit counts the newline, as the
+	// daemon's does, and one byte past it is what tells a report at the
+	// limit from one over it.
 	reader := bufio.NewReader(io.LimitReader(conn, StatusReportBytesMax+1))
 	data, err := reader.ReadBytes('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -236,8 +239,9 @@ func ReadStatus(path string, deadline time.Time) (Report, error) {
 		return Report{}, fmt.Errorf("daemon status exceeds %d bytes", StatusReportBytesMax)
 	}
 	if len(data) == 0 {
-		return Report{}, errors.New("daemon closed the status connection unanswered; " +
-			"it is stopping, or answering other status readers")
+		return Report{}, errors.New("daemon closed the status connection unanswered: " +
+			"it is stopping, it is answering other status readers, " +
+			"or its report failed, which its log records")
 	}
 	if err != nil {
 		return Report{}, errors.New("daemon closed the status connection mid-report")
@@ -259,6 +263,9 @@ func ReadStatus(path string, deadline time.Time) (Report, error) {
 // socket, in key order, at most limit of them. omitted counts the rest. A
 // key here may belong to a daemon that was killed: ReadStatus tells.
 func DaemonKeys(runtimeDir string, limit int) (keys []string, omitted int, err error) {
+	if limit <= 0 {
+		panic(fmt.Sprintf("daemon: DaemonKeys needs a positive limit, got %d", limit))
+	}
 	entries, err := os.ReadDir(runtimeDir)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list daemon runtime directory: %w", err)
@@ -291,4 +298,29 @@ func validKey(name string) bool {
 		}
 	}
 	return true
+}
+
+// RemoveStaleSockets removes the sockets of a key whose daemon was killed
+// without removing them. It reports false, and removes nothing, while any
+// process holds the key's daemon lock: a live daemon, or a starting one.
+//
+// Holding that lock is what makes the removal safe, as it is for Listen. It
+// is taken without waiting and held only for the removal, so a daemon that
+// starts meanwhile waits a moment for it, then listens anew.
+func RemoveStaleSockets(paths Paths) (bool, error) {
+	lock, err := AcquireLock(paths.Lock, time.Now())
+	if errors.Is(err, ErrLockTimeout) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = lock.Release() }()
+
+	for _, socket := range []string{paths.Status, paths.Socket} {
+		if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("remove stale socket %s: %w", socket, err)
+		}
+	}
+	return true, nil
 }

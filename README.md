@@ -364,6 +364,10 @@ indexes, its process and resident memory, how long it took to become
 ready, and the files it has open. It also shows the requests the server
 served and how many failed. The recent figures cover the last 64
 requests, so they show a server that worked for hours and fails now.
+A request that Waythrough refuses before it asks the server does not
+count as a failure. Examples are a file it cannot read, or diagnostics
+from a server that does not offer them. The JSON counts these as
+`refused`.
 CRASHES shows the exits in the last minute against the restart limit.
 A server that is not used yet shows as `idle`. Resident memory shows
 only on Linux.
@@ -382,9 +386,9 @@ each server shows under the table.
 
 `waythrough status --json` prints the same reports as JSON, for a
 script or a dashboard. Read the status as often as you like: it never
-counts as a session, so it never keeps an idle daemon running. A daemon
-that was killed shows as stale until the next session in its workspace
-replaces it.
+counts as a session, so it never keeps an idle daemon running. A
+killed daemon leaves its sockets behind. When no daemon holds the
+key's lock, `status` removes those sockets and says so.
 
 ## Tools
 

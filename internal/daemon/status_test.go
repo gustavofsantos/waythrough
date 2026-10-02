@@ -1,6 +1,7 @@
 package daemon_test
 
 import (
+	"bytes"
 	"net"
 	"os"
 	"path/filepath"
@@ -119,6 +120,19 @@ var _ = Describe("Status", func() {
 		Expect(err).To(MatchError(ContainSubstring("exceeds")))
 	})
 
+	It("accepts a report of exactly the limit, its newline included", func() {
+		statusSocket := shortSocketPath()
+		fakeDaemon(statusSocket, func(conn net.Conn) {
+			report := []byte(`{"format": 1, "pid": 7}`)
+			padding := bytes.Repeat([]byte(" "), daemon.StatusReportBytesMax-len(report)-1)
+			_, _ = conn.Write(append(append(report, padding...), '\n'))
+		})
+
+		report, err := daemon.ReadStatus(statusSocket, time.Now().Add(5*time.Second))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(report.PID).To(Equal(7))
+	})
+
 	It("refuses a report in a format it does not read", func() {
 		statusSocket := shortSocketPath()
 		fakeDaemon(statusSocket, func(conn net.Conn) {
@@ -127,6 +141,40 @@ var _ = Describe("Status", func() {
 
 		_, err := daemon.ReadStatus(statusSocket, time.Now().Add(5*time.Second))
 		Expect(err).To(MatchError(ContainSubstring("status format 99")))
+	})
+})
+
+var _ = Describe("RemoveStaleSockets", func() {
+	var paths daemon.Paths
+
+	BeforeEach(func() {
+		var err error
+		paths, err = daemon.PathsFor(filepath.Dir(shortSocketPath()), testKey)
+		Expect(err).NotTo(HaveOccurred())
+		for _, socket := range []string{paths.Socket, paths.Status} {
+			listener, err := daemon.Listen(socket)
+			Expect(err).NotTo(HaveOccurred())
+			listener.SetUnlinkOnClose(false)
+			Expect(listener.Close()).To(Succeed())
+		}
+	})
+
+	It("removes the sockets a killed daemon left", func() {
+		Expect(daemon.RemoveStaleSockets(paths)).To(BeTrue())
+		Expect(paths.Socket).NotTo(BeAnExistingFile())
+		Expect(paths.Status).NotTo(BeAnExistingFile())
+	})
+
+	// A daemon that has closed its sockets still holds its lock while it
+	// stops its servers, and a starting one holds it before it listens.
+	It("removes nothing while a daemon holds the key's lock", func() {
+		lock, err := daemon.AcquireLock(paths.Lock, time.Now().Add(time.Second))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(lock.Release)
+
+		Expect(daemon.RemoveStaleSockets(paths)).To(BeFalse())
+		Expect(paths.Socket).To(BeAnExistingFile())
+		Expect(paths.Status).To(BeAnExistingFile())
 	})
 })
 

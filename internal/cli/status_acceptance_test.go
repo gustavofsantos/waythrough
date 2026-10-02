@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -91,6 +92,24 @@ var _ = Describe("status", func() {
 		Expect(text).To(ContainSubstring(workspace.root + "  [healthy]"))
 		Expect(text).To(ContainSubstring("1 active of 64"))
 		Expect(text).To(MatchRegexp(`fake\s+\.\s+ready\s+healthy`))
+	})
+
+	It("removes the sockets of a daemon that was killed", func() {
+		workspace := newSharedWorkspace()
+		session := workspace.startSession(time.Hour)
+		Expect(session.definitionLine(workspace.file)).To(Equal(5))
+		killed := workspace.daemonPIDs()[0]
+		Expect(syscall.Kill(killed, syscall.SIGKILL)).To(Succeed())
+		Eventually(func() bool { return processAlive(killed) }, 5*time.Second).
+			Should(BeFalse())
+
+		report := workspace.statusJSON()
+		Expect(report.Daemons).To(BeEmpty())
+		Expect(report.Unreachable).To(HaveLen(1))
+		Expect(report.Unreachable[0].Stale).To(BeTrue())
+		Expect(workspace.sockets()).To(BeEmpty())
+		Expect(workspace.status()).To(ContainSubstring("No waythrough daemon is running"),
+			"once removed, a killed daemon is not reported again")
 	})
 
 	It("never counts as a session, so it never delays a drain", func() {

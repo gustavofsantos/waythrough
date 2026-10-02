@@ -11,6 +11,7 @@ import (
 	"sync"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -50,10 +51,12 @@ func newStatusCommand() *cobra.Command {
 // daemonStatus is what one status read found: a report, or why none came.
 type daemonStatus struct {
 	key    string
-	log    string
-	socket string
+	paths  daemon.Paths
 	report daemon.Report
 	err    error
+	// staleRemoved means no daemon held the key's lock, so its sockets
+	// were left by one that was killed, and this read removed them.
+	staleRemoved bool
 }
 
 func runStatus(stdout io.Writer, jsonOutput bool) error {
@@ -85,7 +88,7 @@ func readStatuses(runtimeDir string, keys []string) ([]daemonStatus, error) {
 		if err != nil {
 			return nil, err
 		}
-		statuses[index] = daemonStatus{key: key, log: paths.Log, socket: paths.Status}
+		statuses[index] = daemonStatus{key: key, paths: paths}
 	}
 
 	deadline := time.Now().Add(statusReadTimeout)
@@ -95,7 +98,19 @@ func readStatuses(runtimeDir string, keys []string) ([]daemonStatus, error) {
 		go func() {
 			defer reads.Done()
 			status := &statuses[index]
-			status.report, status.err = daemon.ReadStatus(status.socket, deadline)
+			status.report, status.err = daemon.ReadStatus(status.paths.Status, deadline)
+			if !errors.Is(status.err, daemon.ErrNotRunning) {
+				return
+			}
+			// No daemon listens. Either one was killed and left its sockets,
+			// or one is stopping its language servers after closing them;
+			// only the second still holds the daemon lock.
+			removed, err := daemon.RemoveStaleSockets(status.paths)
+			if err != nil {
+				status.err = err
+				return
+			}
+			status.staleRemoved = removed
 		}()
 	}
 	reads.Wait()
@@ -114,9 +129,13 @@ type statusOutput struct {
 type unreachableDaemon struct {
 	Key string `json:"key"`
 	Log string `json:"log"`
-	// Stale means the daemon was killed and left its socket file behind.
-	Stale bool   `json:"stale"`
-	Error string `json:"error"`
+	// Stale means the daemon was killed and left its sockets behind, and
+	// this read removed them.
+	Stale bool `json:"stale"`
+	// Stopping means the daemon has closed its sockets and is stopping its
+	// language servers.
+	Stopping bool   `json:"stopping"`
+	Error    string `json:"error"`
 }
 
 func writeStatusJSON(stdout io.Writer, statuses []daemonStatus, omitted int) error {
@@ -130,11 +149,13 @@ func writeStatusJSON(stdout io.Writer, statuses []daemonStatus, omitted int) err
 			output.Daemons = append(output.Daemons, status.report)
 			continue
 		}
+		notRunning := errors.Is(status.err, daemon.ErrNotRunning)
 		output.Unreachable = append(output.Unreachable, unreachableDaemon{
-			Key:   status.key,
-			Log:   status.log,
-			Stale: errors.Is(status.err, daemon.ErrNotRunning),
-			Error: status.err.Error(),
+			Key:      status.key,
+			Log:      status.paths.Log,
+			Stale:    notRunning && status.staleRemoved,
+			Stopping: notRunning && !status.staleRemoved,
+			Error:    status.err.Error(),
 		})
 	}
 	encoder := json.NewEncoder(stdout)
@@ -158,7 +179,7 @@ func writeStatusText(stdout io.Writer, statuses []daemonStatus, omitted int, now
 		writeDaemonText(&text, status, now)
 		shown++
 	}
-	if shown == 0 {
+	if len(statuses) == 0 {
 		text.WriteString("No waythrough daemon is running for this user.\n" +
 			"A daemon runs while a `waythrough serve --shared` session needs it.\n")
 	}
@@ -167,14 +188,18 @@ func writeStatusText(stdout io.Writer, statuses []daemonStatus, omitted int, now
 		if status.err == nil {
 			continue
 		}
-		if errors.Is(status.err, daemon.ErrNotRunning) {
-			fmt.Fprintf(&text, "\nstale daemon %s: killed without cleanup; "+
-				"the next session in its workspace replaces it. Log: %s\n",
-				status.key, status.log)
+		if !errors.Is(status.err, daemon.ErrNotRunning) {
+			fmt.Fprintf(&text, "\nunreachable daemon %s: %s\n  log: %s\n",
+				status.key, printable(status.err.Error()), status.paths.Log)
 			continue
 		}
-		fmt.Fprintf(&text, "\nunreachable daemon %s: %v\n  log: %s\n",
-			status.key, status.err, status.log)
+		if status.staleRemoved {
+			fmt.Fprintf(&text, "\nremoved the sockets of daemon %s, which was killed "+
+				"without removing them.\n  log: %s\n", status.key, status.paths.Log)
+			continue
+		}
+		fmt.Fprintf(&text, "\ndaemon %s is stopping its language servers.\n  log: %s\n",
+			status.key, status.paths.Log)
 	}
 	if omitted > 0 {
 		fmt.Fprintf(&text, "\n%d more daemons not shown; the limit is %d.\n",
@@ -190,7 +215,7 @@ func writeStatusText(stdout io.Writer, statuses []daemonStatus, omitted int, now
 func writeDaemonText(text *strings.Builder, status daemonStatus, now time.Time) {
 	report := status.report
 	sessions := report.Sessions
-	fmt.Fprintf(text, "%s  [%s]\n", report.Root, report.Health)
+	fmt.Fprintf(text, "%s  [%s]\n", printable(report.Root), report.Health)
 	fmt.Fprintf(text, "  daemon    pid %d, waythrough %s, up %s, %s\n",
 		report.PID, report.Version, formatDuration(now.Sub(report.StartedAt)),
 		describeState(sessions, now))
@@ -200,7 +225,7 @@ func writeDaemonText(text *strings.Builder, status daemonStatus, now time.Time) 
 	fmt.Fprintf(text, "  runtime   %d goroutines, %s heap, %s total\n",
 		report.Runtime.Goroutines, formatBytes(report.Runtime.HeapBytes),
 		formatBytes(report.Runtime.TotalBytes))
-	fmt.Fprintf(text, "  log       %s\n\n", status.log)
+	fmt.Fprintf(text, "  log       %s\n\n", status.paths.Log)
 
 	table := tabwriter.NewWriter(text, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(table, "  SERVER\tROOT\tSTATUS\tHEALTH\tPID\tUP\tSTARTUP\tRSS\tDOCS\t"+
@@ -215,9 +240,9 @@ func writeDaemonText(text *strings.Builder, status daemonStatus, now time.Time) 
 			continue
 		}
 		fmt.Fprintf(text, "  last error from %s at %s, %s ago: %s\n",
-			server.Name, displayRoot(report.Root, server.Root),
+			printable(server.Name), displayRoot(report.Root, server.Root),
 			formatDuration(now.Sub(server.Requests.LastErrorAt)),
-			oneLine(server.Requests.LastError))
+			printable(server.Requests.LastError))
 	}
 }
 
@@ -240,7 +265,8 @@ func writeServerRow(table io.Writer, daemonRoot string, server lsp.InstanceStats
 	const rowFormat = "  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t" +
 		"%d\t%d\t%d/%d\t%s\t%s\t%s\t%d/%d\n"
 	_, _ = fmt.Fprintf(table, rowFormat,
-		server.Name, displayRoot(daemonRoot, server.Root), server.Status, server.Health,
+		printable(server.Name), displayRoot(daemonRoot, server.Root),
+		server.Status, server.Health,
 		formatPID(server.PID), up, startup, formatResident(server.ResidentBytes),
 		server.OpenDocuments, requests.Total, requests.Failed,
 		requests.RecentFailed, requests.RecentCount,
@@ -266,14 +292,23 @@ func displayRoot(daemonRoot, serverRoot string) string {
 	}
 	relative, err := filepath.Rel(daemonRoot, serverRoot)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, "../") {
-		return serverRoot
+		return printable(serverRoot)
 	}
-	return relative
+	return printable(relative)
 }
 
-// oneLine keeps an error message to one line of the report.
-func oneLine(message string) string {
-	return strings.Join(strings.Fields(message), " ")
+// printable keeps text to one line of the report, and replaces every
+// character a terminal would act on rather than show. An error message
+// comes from a language server, and a path from the filesystem, so either
+// could carry an escape sequence.
+func printable(text string) string {
+	oneLine := strings.Join(strings.Fields(text), " ")
+	return strings.Map(func(character rune) rune {
+		if unicode.IsPrint(character) {
+			return character
+		}
+		return '?'
+	}, oneLine)
 }
 
 func formatPID(pid int) string {

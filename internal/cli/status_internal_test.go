@@ -41,6 +41,13 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
+func TestPrintableKeepsTerminalControlOut(t *testing.T) {
+	got := printable("bad\x1b[2Jthing\n  on\ttwo lines")
+	if got != "bad?[2Jthing on two lines" {
+		t.Fatalf("printable = %q", got)
+	}
+}
+
 func TestDisplayRoot(t *testing.T) {
 	cases := []struct {
 		serverRoot string

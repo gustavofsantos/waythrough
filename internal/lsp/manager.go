@@ -1874,7 +1874,7 @@ func (p *serverProcess) requirePullDiagnostics(name string) error {
 		return fmt.Errorf("language server %q restarted while this call was in flight", name)
 	}
 	if p.capabilities.DiagnosticProvider == nil {
-		return fmt.Errorf("language server %q does not support pull diagnostics", name)
+		return refused(fmt.Errorf("language server %q does not support pull diagnostics", name))
 	}
 	return nil
 }
@@ -1902,8 +1902,8 @@ func (p *serverProcess) callHierarchyAttempt(name string) (serverAttempt, error)
 		supported = provider != nil
 	}
 	if !supported {
-		return serverAttempt{}, fmt.Errorf(
-			"language server %q does not support call hierarchy", name)
+		return serverAttempt{}, refused(fmt.Errorf(
+			"language server %q does not support call hierarchy", name))
 	}
 	return serverAttempt{
 		generation: p.generation,
@@ -1962,14 +1962,14 @@ func (p *serverProcess) syncFileOnAttempt(
 
 	content, err := readSourceFile(ctx, path)
 	if err != nil {
-		return fmt.Errorf("read file: %w", err)
+		return refused(fmt.Errorf("read file: %w", err))
 	}
 	text := string(content)
 
 	ext := filepath.Ext(path)
 	languageID, ok := p.entry.Filetypes[ext]
 	if !ok {
-		return fmt.Errorf("no languageId configured for extension %q", ext)
+		return refused(fmt.Errorf("no languageId configured for extension %q", ext))
 	}
 
 	p.mu.Lock()

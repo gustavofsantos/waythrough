@@ -244,7 +244,11 @@ re-arm the drain timer. And it still answers while the session socket
 refuses sessions at its limit. The daemon answers at most four status
 connections at once and closes any others unanswered. It closes the
 status socket last, after the sessions drain. During those seconds, a
-reader sees the daemon as `draining` rather than gone.
+reader sees the daemon as `draining` rather than gone. When no daemon
+answers, `status` takes the key's daemon lock without waiting. If it
+gets the lock, the daemon was killed, so `status` removes the sockets
+it left, as `Listen` would. If another process holds the lock, the
+daemon is stopping its language servers, and `status` says so.
 
 The report joins three sources. The registry gives the session counts
 and the state. `runtime/metrics` gives the daemon's own goroutines and
