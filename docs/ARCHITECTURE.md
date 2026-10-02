@@ -17,6 +17,7 @@ tools and check a change.
 | `internal/daemon/` | Shared mode: the workspace key, the private runtime directory, the locks, the daemon's session registry, its status socket, and the client's attach and proxy. |
 | `internal/editor/` | The MCP server. It turns each MCP tool call into an LSP request, and the LSP response back into MCP output. It also serves the `get_status` report and its MCP Apps page. |
 | `internal/status/` | The status report that `get_status` and `waythrough status` share, and the health rule that joins its parts. |
+| `.claude-plugin/`, `skills/waythrough/` | The Claude Code plugin and its marketplace entry, and the skill that steers Claude to the tools. `internal/cli/plugin_skill_test.go` checks that the skill names every registered tool. |
 | `scripts/` | `check.sh`, the check script, and `install-git-hooks.sh`, the hook installer. |
 | `.github/workflows/` | The CI workflow and the release workflow. |
 | `.tools/` | A gitignored directory. It holds the pinned `golangci-lint` binary. |

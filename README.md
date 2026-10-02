@@ -213,6 +213,9 @@ target to list the rest, or see
    and nothing else. Without `--write` the command prints it to stdout
    instead, to read first or to place by hand.
 
+   In Claude Code, you can install the [plugin](#claude-code-plugin)
+   instead.
+
 5. Customize `~/.waythrough.yaml` when you need a different server, command,
    arguments, environment, readiness gate, root policy, or file mapping. For
    example, you can customize how gopls starts:
@@ -279,6 +282,35 @@ target to list the rest, or see
 
    `waythrough validate` checks the same `~/.waythrough.yaml` file that
    `serve` reads. Empty files and unknown configuration fields are rejected.
+
+## Claude Code plugin
+
+In Claude Code, a plugin can take the place of the instructions block in
+step 4. It adds a `waythrough` skill. The skill tells Claude which tool
+answers which question, how to give a position, and what to do when a
+call fails or is slow. It also lets Claude call the eight Waythrough
+tools without a permission prompt each time.
+
+[Install the binary](#install) and create your configuration, then
+connect the MCP server and install the plugin:
+
+```sh
+claude mcp add --scope user waythrough -- waythrough serve --shared
+```
+
+```
+/plugin marketplace add gustavofsantos/waythrough
+/plugin install waythrough@waythrough
+```
+
+Claude loads the skill when a task needs to navigate code. You can also
+run `/waythrough:waythrough`. The skill expects the MCP server under the
+name `waythrough`, as the command above registers it, because Claude
+Code names the tools after the server.
+
+The plugin and the instructions block steer the agent in the same way,
+so you need only one of them. A spec checks that the skill names exactly
+the tools the server registers.
 
 ## Share language servers across sessions
 
